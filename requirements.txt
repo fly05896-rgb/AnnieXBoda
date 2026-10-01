@@ -35,7 +35,7 @@ python-bidi
 
 # ===== Telegram / Calls =====
 ntgcalls==2.2.5
-kurigram~=2.2.21
+kurigram~=2.2.26
 pyromod
 
 # ===== Web / API / Servers =====
