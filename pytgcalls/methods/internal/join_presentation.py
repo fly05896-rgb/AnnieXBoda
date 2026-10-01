@@ -1,5 +1,3 @@
-from typing import Union
-
 from ntgcalls import ConnectionMode
 from ntgcalls import ConnectionNotFound
 from ntgcalls import TelegramServerError
@@ -10,7 +8,7 @@ from ...scaffold import Scaffold
 class JoinPresentation(Scaffold):
     async def _join_presentation(
         self,
-        chat_id: Union[int, str],
+        chat_id: int | str,
         join: bool,
     ):
         connection_mode = await self._binding.get_connection_mode(
@@ -25,9 +23,7 @@ class JoinPresentation(Scaffold):
                     return
                 for retries in range(4):
                     try:
-                        self._wait_connect[
-                            chat_id
-                        ] = self.loop.create_future()
+                        self._wait_connect[chat_id] = self.loop.create_future()
                         payload = await self._binding.init_presentation(
                             chat_id,
                         )
@@ -48,7 +44,13 @@ class JoinPresentation(Scaffold):
                             raise
                         self._log_retries(retries)
                     finally:
-                        self._wait_connect.pop(chat_id, None)
+                        future = self._wait_connect.pop(chat_id, None)
+                        if future is not None:
+                            if future.done():
+                                if not future.cancelled():
+                                    future.exception()
+                            else:
+                                future.cancel()
             elif chat_id in self._presentations:
                 try:
                     await self._binding.stop_presentation(chat_id)
