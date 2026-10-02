@@ -2,7 +2,7 @@ FROM python:3.13
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# 🚀 بيئة إنتاج نظيفة وسريعة (بدون وضع الديباج البطيء)
+# 🚀 بيئة إنتاج نظيفة وسريعة
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# 🚀 إزالة GDB لتخفيف الحجم والاعتماد على الحزم الأساسية فقط
+# 🚀 تثبيت الحزم الأساسية والنظام
 RUN apt-get update --fix-missing && \
     apt-get install -y --no-install-recommends \
     build-essential cmake git curl wget unzip \
@@ -24,8 +24,7 @@ RUN apt-get update --fix-missing && \
 
 RUN uv pip install --upgrade setuptools wheel
 
-COPY pytgcalls /app/pytgcalls
-
+# 1. نسخ ملف المتطلبات أولاً لتثبيت الموديلات الأساسية
 COPY requirements.txt .
 
 RUN grep -v -E -i '^(py-tgcalls|pytgcalls|deepai|numba|llvmlite|quimb)' requirements.txt > filtered.txt && \
@@ -38,10 +37,13 @@ RUN uv pip install --no-cache \
 RUN mkdir -p /etc/yt-dlp && \
     echo "--remote-components ejs:github" > /etc/yt-dlp.conf
 
-# 🚀 التخزين المؤقت لـ yt-dlp
 RUN yt-dlp "ytsearch1:test" --dump-json > /dev/null 2>&1 || true
 
+# 2. نسخ كل ملفات المشروع (بما فيها مجلد pytgcalls) دفعة واحدة هنا
 COPY . .
+
+# 3. إجبار الخادم على تثبيت مجلد pytgcalls المحلي كحزمة رسمية داخل بيئة الحاوية لضمان قراءة ملفات الـ internal
+RUN uv pip install --no-cache -e ./pytgcalls
 
 # 🚀 التشغيل المباشر والصاروخي للبوت
 CMD ["python3", "-m", "AnnieXMedia"]
