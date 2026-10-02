@@ -1,36 +1,31 @@
-app = "anniexboda-ifog6q"
-primary_region = "iad"
+# fly.toml app configuration file generated for anniexboda-c6a2yw on 2026-10-02T21:08:30Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'anniexboda-c6a2yw'
+primary_region = 'ams'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
+
+[env]
+  IP_VERSION = '4'
+  MKL_NUM_THREADS = '10'
+  NUMEXPR_NUM_THREADS = '10'
+  OMP_NUM_THREADS = '10'
+  PYTHONDONTWRITEBYTECODE = '1'
+  PYTHONUNBUFFERED = '1'
+  TMPDIR = '/dev/shm'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
-[env]
-  PYTHONUNBUFFERED = "1"
-  PYTHONDONTWRITEBYTECODE = "1"
-  TMPDIR = "/dev/shm"
-  IP_VERSION = "4"
-  OMP_NUM_THREADS = "10"
-  MKL_NUM_THREADS = "10"
-  NUMEXPR_NUM_THREADS = "10"
-
-[sysctl]
-  "net.core.default_qdisc" = "fq"
-  "net.ipv4.tcp_congestion_control" = "bbr"
-  "net.core.rmem_max" = "16777216"
-  "net.core.wmem_max" = "16777216"
-  "net.ipv4.tcp_rmem" = "4096 87380 16777216"
-  "net.ipv4.tcp_wmem" = "4096 65536 16777216"
-  "net.ipv4.tcp_window_scaling" = "1"
-  "net.ipv4.tcp_slow_start_after_idle" = "0"
-
 [[vm]]
-  cpu_kind = "performance"
+  cpu_kind = 'performance'
   cpus = 10
   memory_mb = 66560
