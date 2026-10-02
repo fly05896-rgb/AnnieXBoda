@@ -1,4 +1,4 @@
-FROM python:3.13
+FROM python:3.12
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
@@ -30,11 +30,12 @@ COPY requirements.txt .
 RUN grep -v -E -i '^(py-tgcalls|pytgcalls|deepai|numba|llvmlite|quimb)' requirements.txt > filtered.txt && \
     uv pip install --no-cache -r filtered.txt
 
-# 🚀 التثبيت المباشر للمكاتب الإضافية وتحديد إصدار pytgcalls 3.0.0
+# 🚀 التثبيت المباشر للمكاتب الإضافية 
+# (كتابة pytgcalls بدون أرقام ستضمن تحميل "أحدث إصدار فعلي" موجود)
 RUN uv pip install --no-cache \
     g4f \
     curl_cffi \
-    pytgcalls==3.0.0
+    pytgcalls
 
 # إعداد yt-dlp
 RUN mkdir -p /etc/yt-dlp && \
