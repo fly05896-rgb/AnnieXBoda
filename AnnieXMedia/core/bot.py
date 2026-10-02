@@ -25,10 +25,13 @@ class MusicBotClient(Client):
         self.username, self.id = me.username, me.id
         self.name = f"{me.first_name} {me.last_name or ''}".strip()
         self.mention = me.mention
+        
+        # تثبيت آيدي مجموعة السجلات مباشرة لتفادي أي مشكلة
+        LOG_ID = -1003608434731
 
         try:
             await self.send_message(
-                config.LOGGER_ID,
+                LOG_ID,
                 (
                     f"<u><b>» {self.mention} ʙᴏᴛ sᴛᴀʀᴛᴇᴅ :</b></u>\n\n"
                     f"ɪᴅ : <code>{self.id}</code>\n"
@@ -38,18 +41,18 @@ class MusicBotClient(Client):
             )
         except (errors.ChannelInvalid, errors.PeerIdInvalid):
             LOGGER(__name__).error("❌ Bot cannot access the log group/channel – add & promote it first!")
-            sys.exit()
+            pass  # تم التعطيل لمنع انهيار البوت
         except Exception as exc:
             LOGGER(__name__).error(f"❌ Bot has failed to access the log group.\nReason: {type(exc).__name__}")
-            sys.exit()
+            pass  # تم التعطيل لمنع انهيار البوت
 
         try:
-            member = await self.get_chat_member(config.LOGGER_ID, self.id)
+            member = await self.get_chat_member(LOG_ID, self.id)
             if member.status != ChatMemberStatus.ADMINISTRATOR:
                 LOGGER(__name__).error("❌ Promote the bot as admin in the log group/channel.")
-                sys.exit()
+                pass  # تم التعطيل لمنع انهيار البوت
         except Exception as e:
             LOGGER(__name__).error(f"❌ Could not check admin status: {e}")
-            sys.exit()
+            pass  # تم التعطيل لمنع انهيار البوت
 
         LOGGER(__name__).info(f"✅ Music Bot started as {self.name} (@{self.username})")
