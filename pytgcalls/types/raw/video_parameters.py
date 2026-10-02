@@ -7,15 +7,16 @@ class VideoParameters(PyObject):
     @statictypes
     def __init__(
         self,
-        width: int = 1280,      # 🔥 تعديل: خلينا الافتراضي HD 720p
-        height: int = 720,      # 🔥 تعديل: ارتفاع 720 بدل 360
-        frame_rate: int = 30,   # 🔥 تعديل: 30 فريم عشان السلاسة (بدل 20 المتقطعة)
+        width: int = 640,
+        height: int = 360,
+        frame_rate: int = 20,
         adjust_by_height: bool = True,
     ):
-        # 🔥 تم نسف القيود: مسحنا كود الـ max و min
-        # دلوقتي المكتبة هتحترم قدرات السيرفر وهتقبل الجودة العالية اللي طلبناها في call.py
-        
-        self.width: int = width
-        self.height: int = height
-        self.frame_rate: int = frame_rate
+        max_w, max_h, max_fps = max(
+            VideoQuality,
+            key=lambda x: x.value[0],
+        ).value
+        self.width: int = min(width, max_w)
+        self.height: int = min(height, max_h)
+        self.frame_rate: int = min(frame_rate, max_fps)
         self.adjust_by_height: bool = adjust_by_height
