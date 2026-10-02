@@ -1,4 +1,4 @@
-FROM python:3.12
+FROM python:3.11
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
@@ -46,6 +46,9 @@ RUN yt-dlp "ytsearch1:test" --dump-json > /dev/null 2>&1 || true
 
 # نسخ باقي ملفات البوت
 COPY . .
+
+# 🚀 حذف المجلد المحلي المزعج حتى لا يتعارض مع المكتبة الرسمية داخل الحاوية
+RUN rm -rf /app/pytgcalls
 
 # 🚀 التشغيل المباشر والصاروخي للبوت
 CMD ["python3", "-m", "AnnieXMedia"]
