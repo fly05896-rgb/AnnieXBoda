@@ -100,7 +100,8 @@ async def manage_callback(client, callback: CallbackQuery, _):
             await StreamController.stop_stream(chat_id)
             await set_loop(chat_id, 0)
             await callback.message.reply_text(_["admin_5"].format(user_mention), reply_markup=close_markup(_))
-            await callback.message.delete()
+            with suppress(Exception):
+                await callback.message.delete()
 
         case "Loop":
             await callback.answer()
@@ -171,7 +172,7 @@ async def handle_skip_replay(callback: CallbackQuery, _, chat_id: int, command: 
     duration = current_track["dur"]
     streamtype = current_track["streamtype"]
     videoid = current_track["vidid"]
-    status = True if str(streamtype) == "video" else False
+    status = str(streamtype) == "video"
 
     db[chat_id][0]["played"] = 0
     if current_track.get("old_dur"):
@@ -203,9 +204,10 @@ async def handle_skip_replay(callback: CallbackQuery, _, chat_id: int, command: 
             db[chat_id][0]["markup"] = "tg"
             await callback.edit_message_text(text_msg, reply_markup=close_markup(_))
 
-        # 🔥 الحل الجذري للكراش + نظام 3.13 
+        # 🔥 الحل الجذري للكراش بعد التحديثات + نظام 3.13 
         case _ if "vid_" in queued:
-            mystic = await callback.message.reply_text(_["call_7"], disable_web_page_preview=True)
+            # تمت إزالة disable_web_page_preview=True لتوافق Pyrogram الإصدارات الحديثة
+            mystic = await callback.message.reply_text(_["call_7"])
             try:
                 # 1. بناء الرابط كاملاً
                 full_url = f"https://www.youtube.com/watch?v={videoid}"
@@ -234,7 +236,8 @@ async def handle_skip_replay(callback: CallbackQuery, _, chat_id: int, command: 
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "stream"
             await callback.edit_message_text(text_msg, reply_markup=close_markup(_))
-            await mystic.delete()
+            with suppress(Exception):
+                await mystic.delete()
 
         case _ if "index_" in queued:
             try:
@@ -289,23 +292,32 @@ async def handle_skip_replay(callback: CallbackQuery, _, chat_id: int, command: 
 
 
 async def handle_seek(callback: CallbackQuery, _, chat_id: int, command: str, user_mention: str):
+    try:
+        cmd_int = int(command)
+    except ValueError:
+        return await callback.answer("عذراً، أمر التقديم أو التأخير غير صالح.", show_alert=True)
+
     playing = db.get(chat_id)
     if not playing or len(playing) == 0:
         return await callback.answer(_["queue_2"], show_alert=True)
+        
     duration_seconds = int(playing[0]["seconds"])
     if duration_seconds == 0:
         return await callback.answer(_["admin_22"], show_alert=True)
+        
     file_path = playing[0]["file"]
     if "index_" in file_path or "live_" in file_path:
         return await callback.answer(_["admin_22"], show_alert=True)
+        
     duration_played = int(playing[0]["played"])
-    duration_to_skip = 10 if int(command) in [1, 2] else 30
+    duration_to_skip = 10 if cmd_int in [1, 2] else 30
     duration = playing[0]["dur"]
-    if int(command) in [1, 3]:
+    
+    if cmd_int in [1, 3]:
         if (duration_played - duration_to_skip) <= 10:
             bet = seconds_to_min(duration_played)
             return await callback.answer(
-                f"لا يمكن التقديم لان المدة تتجاوز الحد\n\nتم تشغيل : {bet} دقيقة من اصل {duration} دقيقة",
+                f"لا يمكن الترجيع لان المدة تتجاوز الحد\n\nتم تشغيل : {bet} دقيقة من اصل {duration} دقيقة",
                 show_alert=True
             )
         to_seek = duration_played - duration_to_skip + 1
@@ -317,8 +329,10 @@ async def handle_seek(callback: CallbackQuery, _, chat_id: int, command: str, us
                 show_alert=True
             )
         to_seek = duration_played + duration_to_skip + 1
+        
     await callback.answer()
     mystic = await callback.message.reply_text(_["admin_24"])
+    
     if "vid_" in file_path:
         n, file_path = await YouTube.video(playing[0]["vidid"], True)
         if n == 0:
@@ -337,10 +351,11 @@ async def handle_seek(callback: CallbackQuery, _, chat_id: int, command: str, us
     except Exception:
         return await mystic.edit_text(_["admin_26"])
         
-    if int(command) in [1, 3]:
+    if cmd_int in [1, 3]:
         db[chat_id][0]["played"] -= duration_to_skip
     else:
         db[chat_id][0]["played"] += duration_to_skip
+        
     seek_message = _["admin_25"].format(seconds_to_min(to_seek))
     await mystic.edit_text(f"{seek_message}\n\nبواسطة : {user_mention}")
 
@@ -383,8 +398,12 @@ async def markup_timer():
             except Exception:
                 continue
 
+# التأكد من عمل المؤقت بدون أخطاء في الـ Event Loop
+try:
+    asyncio.create_task(markup_timer())
+except RuntimeError:
+    pass
 
-asyncio.create_task(markup_timer())
 
 @app.on_callback_query(filters.regex("close") & ~BANNED_USERS)
 async def close_menu(_, query: CallbackQuery):
