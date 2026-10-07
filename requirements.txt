@@ -18,7 +18,7 @@ pytgcrypto
 apscheduler
 
 # ===== Media / Audio / Video ====
-yt-dlp
+yt-dlp==2026.8.19
 pydub
 mutagen
 hachoir
