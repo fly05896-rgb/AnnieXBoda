@@ -24,22 +24,24 @@ class YouTubeAPI:
         self.base_opts = {
             "quiet": True,
             "no_warnings": True,
-            "cookiefile": None, # ضع مسار ملف الكوكيز هنا إذا لزم الأمر
+            "cookiefile": None,
             "force_ipv4": True,
             "source_address": "0.0.0.0",
-            "concurrent_fragment_downloads": 10, # عدد آمن لتسريع التحميل بدون حظر
-            "js_runtimes": {"deno": {}}, # تفعيل دينو كبيئة التشغيل الافتراضية الأسرع
+            "concurrent_fragment_downloads": 10,
+            "js_runtimes": {"deno": {}},
             "remote_components": ["ejs:github"],
             "nocheckcertificate": True,
             "geo_bypass": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["tv_embedded", "android", "ios"]
+                    "player_client": ["android"]
                 }
             }
         }
 
     async def valid(self, url: str) -> bool:
+        if not url or not isinstance(url, str):
+            return False
         return bool(re.match(self.regex, url))
 
     async def url(self, message: Any) -> str | None:
@@ -69,14 +71,16 @@ class YouTubeAPI:
         return await asyncio.to_thread(extract)
 
     async def track(self, link: str, videoid: str | bool | None = None) -> tuple[dict[str, Any], str]:
-        vid = str(videoid) if videoid and str(videoid) not in ["True", "False"] else ""
+        vid = str(videoid) if videoid and str(videoid) not in ["True", "False", "None"] else ""
         if not vid and "v=" in link:
             try:
-                vid = link.split("v=")[1].split("&")[0]
+                extracted = link.split("v=")[1].split("&")[0]
+                if len(extracted) == 11:
+                    vid = extracted
             except IndexError:
                 pass
         
-        query = f"https://youtube.com/watch?v={vid}" if vid else link
+        query = f"https://www.youtube.com/watch?v={vid}" if vid else link
 
         try:
             search = VideosSearch(query, limit=1)
@@ -85,7 +89,7 @@ class YouTubeAPI:
             if result and "result" in result and len(result["result"]) > 0:
                 info = result["result"][0]
                 v_id = info.get("id", vid)
-                duration = info.get("duration", "0:00")
+                duration = info.get("duration") or "0:00"
                 
                 thumb_url = ""
                 if "thumbnails" in info and len(info["thumbnails"]) > 0:
@@ -105,18 +109,19 @@ class YouTubeAPI:
             log.error(f"Track Search error: {e}")
             return {"title": "Unknown", "duration_min": "0:00", "thumb": "", "vidid": vid, "link": link}, vid
 
-    async def details(self, link: str, videoid: str | bool | None = None) -> tuple[str, str | None, int, str, str]:
+    async def details(self, link: str, videoid: str | bool | None = None) -> tuple[str, str, int, str, str]:
         data, vid = await self.track(link, videoid)
-        dur = data.get("duration_min", "0:00")
+        dur = data.get("duration_min") or "0:00"
         
         secs = 0
         try:
-            parts = [int(p) for p in str(dur).split(":")]
-            secs = sum(p * (60 ** i) for i, p in enumerate(reversed(parts)))
+            parts = [int(p) for p in str(dur).split(":") if str(p).isdigit()]
+            if parts:
+                secs = sum(p * (60 ** i) for i, p in enumerate(reversed(parts)))
         except Exception as e:
             log.error(f"Duration parsing error: {e}")
             
-        return data["title"], dur, secs, data["thumb"], str(vid)
+        return data.get("title", "Unknown"), str(dur), secs, data.get("thumb", ""), str(vid)
 
     async def search(self, query: str, limit: int = 10) -> list[dict[str, str]]:
         try:
@@ -130,7 +135,7 @@ class YouTubeAPI:
                 {
                     "title": d.get("title", "Unknown"), 
                     "vidid": d.get("id"), 
-                    "duration": d.get("duration", "0:00")
+                    "duration": d.get("duration") or "0:00"
                 }
                 for d in result["result"]
             ]
@@ -139,19 +144,18 @@ class YouTubeAPI:
             return []
 
     async def download(self, link: str, mystic: Any, video: str | bool | None = None, videoid: str | bool | None = None, **kwargs) -> str | None:
-        vid = str(videoid) if videoid and str(videoid) not in ["True", "False"] else ""
+        vid = str(videoid) if videoid and str(videoid) not in ["True", "False", "None"] else ""
         if not vid and "v=" in link:
             try:
-                vid = link.split("v=")[1].split("&")[0]
+                extracted = link.split("v=")[1].split("&")[0]
+                if len(extracted) == 11:
+                    vid = extracted
             except IndexError:
                 pass
         
-        target_url = f"https://www.youtube.com/watch?v={vid}" if vid else link
+        target_url = f"https://www.youtube.com/watch?v={vid}" if len(vid) == 11 else link
         
-        # اختيار الجودة الأفضل لبث تيليجرام
-        # الصوت: الأولوية لـ m4a لتقليل استهلاك المعالج وتجنب الـ Transcoding
-        # الفيديو: دمج أفضل فيديو بحد أقصى 1080p مع الصوت لتجنب مشاكل التشغيل
-        media_format = "best[height<=1080]/best" if video else "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
+        media_format = "best[height<=1080]/best" if video else "bestaudio/best"
         
         opts = self.base_opts.copy()
         opts["format"] = media_format
