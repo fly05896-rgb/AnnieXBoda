@@ -6,15 +6,13 @@ from pyrogram.enums import ChatMemberStatus, ParseMode
 import config
 from ..logging import LOGGER
 
-LOGGER_ID = -1004295349964
-
 class MusicBotClient(Client):
     def __init__(self):
         super().__init__(
             name="AnnieXMusic",
             api_id=config.API_ID,
             api_hash=config.API_HASH,
-            bot_token="8575751545:AAEe0b5-Yid9jno5OOzWSlVXuhylAoHbxfw", # تم إضافة التوكن يدوياً هنا
+            bot_token=config.BOT_TOKEN,  # تم الإرجاع للسحب من الكونفيج
             workers=48,
             max_concurrent_transmissions=7,
         )
@@ -31,7 +29,7 @@ class MusicBotClient(Client):
 
         try:
             await self.send_message(
-                chat_id=LOGGER_ID,
+                chat_id=config.LOGGER_ID,  # تم الإرجاع للسحب من الكونفيج
                 text=(
                     f"<u><b>» {self.mention} ʙᴏᴛ sᴛᴀʀᴛᴇᴅ :</b></u>\n\n"
                     f"ɪᴅ : <code>{self.id}</code>\n"
@@ -45,7 +43,7 @@ class MusicBotClient(Client):
                 f"❌ Bot cannot access the log group/channel.\n"
                 f"⚠️ The Exact Error is: {e}\n\n"
                 f"💡 Tips to fix (نصائح للحل):\n"
-                f"1. تأكد أن البوت مضاف فعلياً في الجروب صاحب الآيدي {LOGGER_ID}.\n"
+                f"1. تأكد أن البوت مضاف فعلياً في الجروب صاحب الآيدي المكتوب في الكونفيج.\n"
                 f"2. أرسل أي رسالة في الجروب واعمل منشن للبوت فيها ليتعرف عليه، ثم أعد تشغيل السيرفر."
             )
             sys.exit()
@@ -54,7 +52,7 @@ class MusicBotClient(Client):
             sys.exit()
 
         try:
-            member = await self.get_chat_member(chat_id=LOGGER_ID, user_id=self.id)
+            member = await self.get_chat_member(chat_id=config.LOGGER_ID, user_id=self.id)
             if member.status != ChatMemberStatus.ADMINISTRATOR:
                 LOGGER(__name__).error("❌ Promote the bot as admin in the log group/channel (قم برفع البوت كمشرف في الجروب).")
                 sys.exit()
