@@ -34,7 +34,7 @@ class YouTubeAPI:
             "geo_bypass": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "mweb", "android"]
+                    "player_client": ["tv_embedded", "android", "ios"]
                 }
             }
         }
