@@ -40,7 +40,7 @@ AUTO_DOWNLOADS_CLEAR = getenv("AUTO_DOWNLOADS_CLEAR", "True")
 
 # ── Database & logging ─────────────────────────────────────────────────────────
 MONGO_DB_URI = getenv("MONGO_DB_URI")
-LOGGER_ID = int(getenv("LOGGER_ID", -1003339220169))
+LOGGER_ID = int(getenv("LOGGER_ID", -1004295349964))
 
 # ── Limits & AI Groups ────────────────────────────────────────────────────────
 DURATION_LIMIT_MIN = int(getenv("DURATION_LIMIT", 600)) 
