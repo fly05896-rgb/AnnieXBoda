@@ -6,7 +6,6 @@ from pyrogram.enums import ChatMemberStatus, ParseMode
 import config
 from ..logging import LOGGER
 
-# تم وضع الآيدي الخاص بك مباشرة كـ Integer (رقم صحيح) لتجنب أخطاء قراءته كنص من ملف config
 LOGGER_ID = -1004295349964
 
 class MusicBotClient(Client):
@@ -15,7 +14,7 @@ class MusicBotClient(Client):
             name="AnnieXMusic",
             api_id=config.API_ID,
             api_hash=config.API_HASH,
-            bot_token=config.BOT_TOKEN,
+            bot_token="8575751545:AAEe0b5-Yid9jno5OOzWSlVXuhylAoHbxfw", # تم إضافة التوكن يدوياً هنا
             workers=48,
             max_concurrent_transmissions=7,
         )
@@ -31,7 +30,6 @@ class MusicBotClient(Client):
         self.mention = me.mention
 
         try:
-            # تم إضافة parse_mode=ParseMode.HTML وتحديد المعلمات بشكل صريح لتوافق أفضل مع المكتبة
             await self.send_message(
                 chat_id=LOGGER_ID,
                 text=(
@@ -56,7 +54,6 @@ class MusicBotClient(Client):
             sys.exit()
 
         try:
-            # التحقق من صلاحيات البوت باستخدام الـ Enums الصحيحة للمكتبة
             member = await self.get_chat_member(chat_id=LOGGER_ID, user_id=self.id)
             if member.status != ChatMemberStatus.ADMINISTRATOR:
                 LOGGER(__name__).error("❌ Promote the bot as admin in the log group/channel (قم برفع البوت كمشرف في الجروب).")
