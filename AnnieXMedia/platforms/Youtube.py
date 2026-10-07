@@ -30,9 +30,11 @@ class YouTubeAPI:
             "concurrent_fragment_downloads": 10, # عدد آمن لتسريع التحميل بدون حظر
             "js_runtimes": {"deno": {}}, # تفعيل دينو كبيئة التشغيل الافتراضية الأسرع
             "remote_components": ["ejs:github"],
+            "nocheckcertificate": True,
+            "geo_bypass": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android_vr", "android"]
+                    "player_client": ["ios", "mweb", "android"]
                 }
             }
         }
