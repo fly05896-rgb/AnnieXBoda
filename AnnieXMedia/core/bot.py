@@ -36,11 +36,20 @@ class MusicBotClient(Client):
                     f"ᴜsᴇʀɴᴀᴍᴇ : @{self.username}"
                 ),
             )
-        except (errors.ChannelInvalid, errors.PeerIdInvalid):
-            LOGGER(__name__).error("❌ Bot cannot access the log group/channel – add & promote it first!")
+        except (errors.ChannelInvalid, errors.PeerIdInvalid) as e:
+            # هنا تم التعديل لعرض رسالة الخطأ الأصلية من تيليجرام
+            LOGGER(__name__).error(
+                f"❌ Bot cannot access the log group/channel.\n"
+                f"⚠️ The Exact Error is: {e}\n\n"
+                f"💡 Tips to fix (نصائح للحل):\n"
+                f"1. تأكد أن معرف الجروب LOGGER_ID في ملف الـ config يبدأ بـ '-100'.\n"
+                f"2. أو استخدم يوزر نيم الجروب مباشرة (مثال: '@MyLogGroup') بدلاً من الأرقام.\n"
+                f"3. اكتب أي رسالة في جروب السجل واعمل منشن للبوت فيها، ثم أعد تشغيل السيرفر."
+            )
             sys.exit()
         except Exception as exc:
-            LOGGER(__name__).error(f"❌ Bot has failed to access the log group.\nReason: {type(exc).__name__}")
+            # تم إضافة {exc} لعرض الخطأ الفعلي بدلاً من اسمه فقط
+            LOGGER(__name__).error(f"❌ Bot has failed to access the log group.\nReason: {type(exc).__name__} - {exc}")
             sys.exit()
 
         try:
