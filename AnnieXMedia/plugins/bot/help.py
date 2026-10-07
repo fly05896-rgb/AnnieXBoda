@@ -61,10 +61,11 @@ async def helper_private(client: Client, update: Union[Message, types.CallbackQu
 @LanguageStart
 async def help_com_group(client: Client, message: Message, _):
     keyboard = private_help_panel(_)
+    # استخدام الدوال الحديثة لتعطيل معاينة الروابط بدلاً من disable_web_page_preview
     await message.reply_text(
         _["help_2"],
         reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True
+        link_preview_options=types.LinkPreviewOptions(is_disabled=True)
     )
 
 # ────────────────────────────────────────────────  main help buttons ──
@@ -84,7 +85,7 @@ async def helper_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
         await CallbackQuery.edit_message_text(
             _["S_B_M"],
             reply_markup=action_sub_menu(_, current_page),
-            disable_web_page_preview=True
+            link_preview_options=types.LinkPreviewOptions(is_disabled=True)
         )
         return
 
@@ -96,7 +97,7 @@ async def helper_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
     await CallbackQuery.edit_message_text(
         help_text,
         reply_markup=help_back_markup(_, current_page),
-        disable_web_page_preview=True
+        link_preview_options=types.LinkPreviewOptions(is_disabled=True)
     )
 
 # ─────────────────────────────────────────  pagination callbacks ─────
@@ -108,7 +109,7 @@ async def help_next_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
         await CallbackQuery.edit_message_text(
             _["help_1"].format(SUPPORT_CHAT),
             reply_markup=second_page(_),
-            disable_web_page_preview=True
+            link_preview_options=types.LinkPreviewOptions(is_disabled=True)
         )
     else:
         await CallbackQuery.answer("لا توجد صفحات اخرى.", show_alert=True)
@@ -120,7 +121,7 @@ async def help_prev_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
         await CallbackQuery.edit_message_text(
             _["help_1"].format(SUPPORT_CHAT),
             reply_markup=first_page(_),
-            disable_web_page_preview=True
+            link_preview_options=types.LinkPreviewOptions(is_disabled=True)
         )
     else:
         await CallbackQuery.answer("لا توجد صفحات سابقة.", show_alert=True)
@@ -139,7 +140,7 @@ async def help_back_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
     await CallbackQuery.edit_message_text(
         _["help_1"].format(SUPPORT_CHAT),
         reply_markup=keyboard,
-        disable_web_page_preview=True
+        link_preview_options=types.LinkPreviewOptions(is_disabled=True)
     )
 
 # ────────────────────────────────────────  sub-topic buttons (Action) ─
@@ -150,7 +151,7 @@ async def action_prom_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
     await CallbackQuery.edit_message_text(
         helpers.HELP_1_PROMO,
         reply_markup=help_back_markup(_, 1),
-        disable_web_page_preview=True
+        link_preview_options=types.LinkPreviewOptions(is_disabled=True)
     )
 
 @app.on_callback_query(filters.regex("action_pun_1") & ~BANNED_USERS)
@@ -159,7 +160,7 @@ async def action_pun_cb(client: Client, CallbackQuery: types.CallbackQuery, _):
     await CallbackQuery.edit_message_text(
         helpers.HELP_1_PUNISH,
         reply_markup=help_back_markup(_, 1),
-        disable_web_page_preview=True
+        link_preview_options=types.LinkPreviewOptions(is_disabled=True)
     )
 
 # ────────────────────────────────────────────────  back to start panel ─
