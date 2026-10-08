@@ -1,14 +1,14 @@
 import asyncio
-import re
+import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
-import aiohttp
 import aiofiles
+import aiohttp
 from pyrogram import enums
-from yt_dlp import YoutubeDL
 from youtubesearchpython.aio import VideosSearch
 
 log = logging.getLogger("AnnieXMedia.YouTube")
@@ -21,24 +21,6 @@ class YouTubeAPI:
             r"(youtube\.com/(watch\?v=|shorts/|playlist\?list=)|youtu\.be/)"
             r"([A-Za-z0-9_-]{11}|PL[A-Za-z0-9_-]+)([&?][^\s]*)?"
         )
-        
-        # 🚀 إعدادات yt-dlp المتوافقة مع تحديثات 2026 
-        self.base_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "no_color": True,
-            # التوافق مع القيود العمرية عن طريق الكوكيز (إن وجد)
-            "cookiefile": "cookies.txt" if os.path.isfile("cookies.txt") else None,
-            "extract_flat": False,
-            "nocheckcertificate": True,
-            "geo_bypass": True,
-            # السماح لـ yt-dlp باستخدام العملاء الافتراضيين الحديثين (web, ios, tv)
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["web", "ios", "tv"],
-                }
-            }
-        }
 
     async def valid(self, url: str) -> bool:
         if not url or not isinstance(url, str):
@@ -64,13 +46,6 @@ class YouTubeAPI:
                 except Exception as e:
                     log.warning(f"Error parsing entity: {e}")
         return None
-
-    # دالة استخراج البيانات في مسار (Thread) منفصل لمنع تجميد البوت
-    async def _extract_native(self, query: str, opts: dict) -> dict:
-        def extract():
-            with YoutubeDL(opts) as ydl:
-                return ydl.extract_info(query, download=False)
-        return await asyncio.to_thread(extract)
 
     # 🚀 جلب تفاصيل التراك بسرعة باستخدام VideosSearch
     async def track(self, link: str, videoid: str | bool | None = None) -> tuple[dict[str, Any], str]:
@@ -147,7 +122,69 @@ class YouTubeAPI:
             log.error(f"Search error: {e}")
             return []
 
-    # 🚀 قلب عملية التشغيل (استخراج الـ URL المباشر للفيديو/الصوت)
+    # 🚀 المعالج الصاروخي والمضمون (Subprocess Engine)
+    async def _run_ytdlp_cli(self, target_url: str, is_video: bool) -> str | None:
+        """
+        يستخدم yt-dlp كأمر موجه (CLI) لاستخراج الرابط المباشر.
+        هذه الطريقة تفعل تلقائياً أنظمة (PO Tokens) و (JS Challenge) الحديثة بدون فشل.
+        """
+        # تحديد الجودة (الفيديو: دمج بأفضل 720p، الصوت: أفضل صوت فقط)
+        format_str = "bestvideo[height<=720]+bestaudio/best[height<=720]/best" if is_video else "bestaudio/best"
+        
+        # الأوامر الأساسية: استخراج JSON فقط (بدون تحميل)، وتخطي تحذيرات الشهادات.
+        cmd = [
+            "yt-dlp",
+            "--no-warnings",
+            "--no-check-certificate",
+            "--geo-bypass",
+            "--format", format_str,
+            "--dump-json",
+            target_url
+        ]
+
+        # إضافة ملف الكوكيز إن وجد لتخطي القيود العمرية
+        if os.path.isfile("cookies.txt"):
+            cmd.extend(["--cookies", "cookies.txt"])
+
+        try:
+            # تشغيل العملية في الخلفية (Asynchronous Subprocess)
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                err_msg = stderr.decode('utf-8').strip()
+                log.error(f"yt-dlp CLI error for {target_url}: {err_msg}")
+                return None
+
+            try:
+                # فك تشفير مخرجات JSON
+                info = json.loads(stdout.decode('utf-8'))
+                
+                # إرجاع الرابط المباشر
+                direct_url = info.get("url")
+                
+                # محاولة احتياطية إذا لم يتوفر الرابط في الجذر
+                if not direct_url and "formats" in info:
+                    for f in info["formats"]:
+                        if f.get("url") and (f.get("vcodec") != "none" if is_video else f.get("acodec") != "none"):
+                            direct_url = f.get("url")
+                            break
+                            
+                return direct_url
+            except json.JSONDecodeError:
+                log.error(f"Failed to parse yt-dlp JSON output for {target_url}")
+                return None
+
+        except Exception as e:
+            log.error(f"Failed to execute yt-dlp subprocess: {e}")
+            return None
+
+    # قلب عملية التشغيل (استخراج الـ URL المباشر للفيديو/الصوت)
     async def download(self, link: str, mystic: Any, video: str | bool | None = None, videoid: str | bool | None = None, **kwargs) -> str | None:
         vid = str(videoid) if videoid and str(videoid) not in ["True", "False", "None"] else ""
         link = str(link) if link else ""
@@ -160,7 +197,6 @@ class YouTubeAPI:
             except IndexError:
                 pass
         
-        # 🛡️ تنظيف معرف الفيديو وبناء الرابط بشكل صارم لمنع الأخطاء
         target_url = ""
         if vid and len(vid) >= 11:
             clean_vid = vid.replace("_v", "")[:11] 
@@ -172,52 +208,42 @@ class YouTubeAPI:
             log.error(f"Download Error: Invalid URL/ID. link='{link}', videoid='{videoid}'")
             return None
         
-        # ⚡ تحديد الصيغ بأمان لتجنب إرجاع `None` من يوتيوب
-        # إذا طلبنا فيديو: يفضل أفضل دمج للفيديو والصوت بجودة 720، وإذا لم يجد يحضر أفضل ما هو متاح
-        # إذا طلبنا صوت: يجلب أفضل جودة صوت
-        media_format = "bestvideo[height<=720]+bestaudio/best[height<=720]/best" if video else "bestaudio/best"
-        
-        opts = self.base_opts.copy()
-        opts["format"] = media_format
-        opts["noplaylist"] = True
-        
-        try:
-            # 🚀 استخراج الرابط المباشر من yt-dlp
-            info = await self._extract_native(target_url, opts)
-            
-            if not info:
-                log.error(f"Extraction Error: yt-dlp returned None for {target_url}")
-                return None
-                
-            # يوتيوب يعيد الرابط المباشر داخل الـ 'url'، أو داخل قائمة الـ 'formats' في بعض الحالات
-            direct_url = info.get("url")
-            
-            # محاولة احتياطية لجلب الرابط إذا لم يكن في الجذر الرئيسي لـ info
-            if not direct_url and "formats" in info:
-                for f in info["formats"]:
-                    if f.get("url") and f.get("vcodec") != "none" if video else f.get("acodec") != "none":
-                        direct_url = f.get("url")
-                        break
-                        
-            return direct_url
-            
-        except Exception as e:
-            log.error(f"Extraction Error for {target_url}: {e}")
-            return None
+        # استدعاء المحرك الصاروخي 🚀
+        is_video = bool(video)
+        return await self._run_ytdlp_cli(target_url, is_video)
 
     # دالة مساعدة للحصول على الرابط المباشر
     async def get_direct_link(self, link: str, *, prefer_audio: bool = True) -> str | None:
         return await self.download(link, None, video=not prefer_audio)
                 
     async def get_playlist(self, url: str) -> list[str]:
-        opts = self.base_opts.copy()
-        opts["extract_flat"] = True 
-        opts["skip_download"] = True
+        # استخراج بيانات القائمة باستخدام CLI أيضاً لضمان الدقة
+        cmd = [
+            "yt-dlp",
+            "--flat-playlist",
+            "--dump-json",
+            url
+        ]
         try:
-            info = await self._extract_native(url, opts)
-            if not info:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await process.communicate()
+            
+            if process.returncode != 0:
                 return []
-            return [f"https://www.youtube.com/watch?v={entry['id']}" for entry in info.get("entries", []) if entry.get("id")]
+                
+            entries = []
+            for line in stdout.decode('utf-8').splitlines():
+                try:
+                    info = json.loads(line)
+                    if info.get("id"):
+                        entries.append(f"https://www.youtube.com/watch?v={info['id']}")
+                except json.JSONDecodeError:
+                    continue
+            return entries
         except Exception as e:
             log.error(f"Playlist extraction error: {e}")
             return []
