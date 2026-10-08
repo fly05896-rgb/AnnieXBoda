@@ -1,7 +1,3 @@
-# Authored By Certified Coders © 2026
-# System: PyTgCalls V2.2.11 Core Call Controller
-# Optimized for Python 3.13+ Asyncio, NTgCalls Native Binds & Suppress
-
 import asyncio
 import logging
 import traceback
@@ -14,6 +10,7 @@ from pyrogram.types import InlineKeyboardMarkup, InputMediaPhoto
 from pyrogram.errors import ChatAdminRequired
 
 from pytgcalls import PyTgCalls, filters
+# تحديثات الاستيراد لدعم V2.2+ و V3.0+
 from pytgcalls.types import (
     MediaStream,
     AudioQuality,
@@ -22,8 +19,12 @@ from pytgcalls.types import (
     Update,
     ChatUpdate,
     StreamEnded,
-    GroupCallParticipant
+    GroupCallParticipant,
+    UpdatedGroupCallParticipant # <-- إضافة ضرورية لـ V2.2.X+
 )
+# إضافة استيراد معلمات الجودة المخصصة (حسب هيكل V3.0)
+from pytgcalls.types.raw import AudioParameters, VideoParameters # <-- إضافة ضرورية للتحكم بالجودة
+
 from pytgcalls.exceptions import (
     NoActiveGroupCall,
     NotInCallError,
@@ -82,10 +83,14 @@ def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> Medi
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     
+    # تحديث: استخدام .from_quality() لضمان التوافق مع PyTgCalls الحديث
+    audio_params = AudioParameters.from_quality(AudioQuality.HIGH)
+    video_params = VideoParameters.from_quality(VideoQuality.HD_720p)
+    
     return MediaStream(
         media_path=path,
-        audio_parameters=AudioQuality.HIGH, # جودة صوت ثابتة عالية
-        video_parameters=VideoQuality.HD_720p, 
+        audio_parameters=audio_params,
+        video_parameters=video_params, 
         video_flags=MediaStream.Flags.REQUIRED if video else MediaStream.Flags.IGNORE,
         audio_flags=MediaStream.Flags.REQUIRED,
         ffmpeg_parameters=final_ffmpeg,
@@ -265,7 +270,7 @@ class Call:
                         autoend[chat_id] = datetime.now() + timedelta(minutes=1)
 
     async def start(self) -> None:
-        LOGGER(__name__).info("Starting PyTgCalls Clients (NTgCalls v2.2.11)...")
+        LOGGER(__name__).info("Starting PyTgCalls Clients (NTgCalls v3.0)...")
         if self.userbot1: self.one = PyTgCalls(self.userbot1)
         if self.userbot2: self.two = PyTgCalls(self.userbot2)
         if self.userbot3: self.three = PyTgCalls(self.userbot3)
@@ -301,7 +306,8 @@ class Call:
             async def left_call_handler(client: PyTgCalls, update: Update):
                 await self.stop_stream(update.chat_id)
             
-            @assistant.on_update(filters.call_participant(GroupCallParticipant.Action.KICKED))
+            # تحديث لمعالجة GroupCallParticipant V2.2.X+
+            @assistant.on_update(filters.call_participant(UpdatedGroupCallParticipant.Action.KICKED))
             async def kicked_handler(client: PyTgCalls, update: Update):
                 await self.stop_stream(update.chat_id)
 
