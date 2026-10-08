@@ -4,7 +4,8 @@
 
 from contextlib import suppress
 from pyrogram import filters
-from pyrogram.types import InlineKeyboardMarkup, Message
+# تمت إضافة LinkPreviewOptions للإصدارات الحديثة
+from pyrogram.types import InlineKeyboardMarkup, Message, LinkPreviewOptions
 
 import config
 from AnnieXMedia import YouTube, app
@@ -149,7 +150,11 @@ async def skip(cli, message: Message, _, chat_id: int):
             
         # [B] YouTube Video / Audio Downloaded
         case _ if "vid_" in queued:
-            mystic = await message.reply_text(_["call_7"], disable_web_page_preview=True)
+            # تم التحديث لحل الكراش باستخدام LinkPreviewOptions بدلاً من disable_web_page_preview
+            mystic = await message.reply_text(
+                _["call_7"], 
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
             try:
                 # 🔥 بناء الرابط كامل لمنع الكراش
                 full_url = f"https://www.youtube.com/watch?v={videoid}"
