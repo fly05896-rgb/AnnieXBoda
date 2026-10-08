@@ -1,3 +1,7 @@
+# Authored By Certified Coders © 2026
+# System: PyTgCalls V3.0 Core Call Controller
+# Optimized for Python 3.13+ Asyncio, NTgCalls Native Binds & Suppress
+
 import asyncio
 import logging
 import traceback
@@ -10,7 +14,7 @@ from pyrogram.types import InlineKeyboardMarkup, InputMediaPhoto
 from pyrogram.errors import ChatAdminRequired
 
 from pytgcalls import PyTgCalls, filters
-# تحديثات الاستيراد لدعم V2.2+ و V3.0+
+# استيرادات نظيفة ومحدثة لدعم PyTgCalls V3.0
 from pytgcalls.types import (
     MediaStream,
     AudioQuality,
@@ -19,11 +23,9 @@ from pytgcalls.types import (
     Update,
     ChatUpdate,
     StreamEnded,
-    GroupCallParticipant,
-    UpdatedGroupCallParticipant # <-- إضافة ضرورية لـ V2.2.X+
+    GroupCallParticipant
 )
-# إضافة استيراد معلمات الجودة المخصصة (حسب هيكل V3.0)
-from pytgcalls.types.raw import AudioParameters, VideoParameters # <-- إضافة ضرورية للتحكم بالجودة
+from pytgcalls.types.raw import AudioParameters, VideoParameters
 
 from pytgcalls.exceptions import (
     NoActiveGroupCall,
@@ -70,12 +72,7 @@ def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> Medi
     """بناء مجرى البيانات وفقاً لأحدث معايير MediaStream مع تخطي حمايات 2026"""
     path = str(path)
     
-    # 🔴 التعديلات الصاروخية:
-    # 1. إزالة فلاتر الصوت التلقائية لمنع (الصوت اللي بيوطى ويعلى لوحده)
-    # 2. إزالة -nobuffer للسماح بالكاش ومنع التقطيع
-    # 3. استخدام -threads 0 لتسخير كل أنوية السيرفر
-    # 4. عدم استخدام reconnect يدوي لتجنب تهنيج الروابط
-    
+    # 🔴 التعديلات الصاروخية ليتوافق مع WebRTC (m152) وتحسينات FFmpeg الجديدة:
     base_flags = "-probesize 10M -analyzeduration 10M -threads 0 "
     final_ffmpeg = base_flags + ffmpeg_opts
     
@@ -83,7 +80,6 @@ def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> Medi
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     
-    # تحديث: استخدام .from_quality() لضمان التوافق مع PyTgCalls الحديث
     audio_params = AudioParameters.from_quality(AudioQuality.HIGH)
     video_params = VideoParameters.from_quality(VideoQuality.HD_720p)
     
@@ -104,7 +100,6 @@ async def _clear_(chat_id: int) -> None:
         await auto_clean(popped)
     db[chat_id] = []
     
-    # 🚀 بايثون 3.13: استخدام Suppress للتخطي الصامت للأخطاء 
     with suppress(Exception):
         await remove_active_video_chat(chat_id)
         await remove_active_chat(chat_id)
@@ -270,7 +265,7 @@ class Call:
                         autoend[chat_id] = datetime.now() + timedelta(minutes=1)
 
     async def start(self) -> None:
-        LOGGER(__name__).info("Starting PyTgCalls Clients (NTgCalls v3.0)...")
+        LOGGER(__name__).info("Starting PyTgCalls Clients (NTgCalls v3.0.0)...")
         if self.userbot1: self.one = PyTgCalls(self.userbot1)
         if self.userbot2: self.two = PyTgCalls(self.userbot2)
         if self.userbot3: self.three = PyTgCalls(self.userbot3)
@@ -306,8 +301,8 @@ class Call:
             async def left_call_handler(client: PyTgCalls, update: Update):
                 await self.stop_stream(update.chat_id)
             
-            # تحديث لمعالجة GroupCallParticipant V2.2.X+
-            @assistant.on_update(filters.call_participant(UpdatedGroupCallParticipant.Action.KICKED))
+            # 🛑 التصحيح النهائي: استخدام الكلاس الأصلي GroupCallParticipant بناءً على تأكيد المطور
+            @assistant.on_update(filters.call_participant(GroupCallParticipant.Action.KICKED))
             async def kicked_handler(client: PyTgCalls, update: Update):
                 await self.stop_stream(update.chat_id)
 
