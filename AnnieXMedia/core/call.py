@@ -14,18 +14,15 @@ from pyrogram.types import InlineKeyboardMarkup, InputMediaPhoto
 from pyrogram.errors import ChatAdminRequired
 
 from pytgcalls import PyTgCalls, filters
-# استيرادات نظيفة ومحدثة لدعم PyTgCalls V3.0
+# استيرادات نظيفة ومحدثة لدعم PyTgCalls V3.0 بناءً على التوثيق الرسمي
 from pytgcalls.types import (
     MediaStream,
-    AudioQuality,
-    VideoQuality,
     GroupCallConfig,
     Update,
     ChatUpdate,
     StreamEnded,
     GroupCallParticipant
 )
-from pytgcalls.types.raw import AudioParameters, VideoParameters
 
 from pytgcalls.exceptions import (
     NoActiveGroupCall,
@@ -80,13 +77,10 @@ def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> Medi
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     
-    audio_params = AudioParameters.from_quality(AudioQuality.HIGH)
-    video_params = VideoParameters.from_quality(VideoQuality.HD_720p)
-    
+    # 🚀 التحديث الأهم بناءً على توثيق PyTgCalls: 
+    # لا نقوم بتمرير audio_parameters أو video_parameters. المكتبة تختار الجودة المناسبة تلقائياً.
     return MediaStream(
         media_path=path,
-        audio_parameters=audio_params,
-        video_parameters=video_params, 
         video_flags=MediaStream.Flags.REQUIRED if video else MediaStream.Flags.IGNORE,
         audio_flags=MediaStream.Flags.REQUIRED,
         ffmpeg_parameters=final_ffmpeg,
@@ -301,7 +295,6 @@ class Call:
             async def left_call_handler(client: PyTgCalls, update: Update):
                 await self.stop_stream(update.chat_id)
             
-            # 🛑 التصحيح النهائي: استخدام الكلاس الأصلي GroupCallParticipant بناءً على تأكيد المطور
             @assistant.on_update(filters.call_participant(GroupCallParticipant.Action.KICKED))
             async def kicked_handler(client: PyTgCalls, update: Update):
                 await self.stop_stream(update.chat_id)
