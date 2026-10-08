@@ -11,9 +11,12 @@ if os.environ.get("DEBUG_NTG") == "1":
     logging.getLogger('ntgcalls').setLevel(logging.DEBUG)
     print("🚨 تم تفعيل وضع الـ DEBUG لمكتبة ntgcalls بناءً على طلبك من الكونسول 🚨")
 
-# 🚀 الطريقة القياسية لـ Python 3.12+ لتهيئة الـ Event Loop دون أخطاء Deprecation
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
+# 🚀 الطريقة الصحيحة لمنع تعارض الـ Event Loop مع MongoDB و Pyromod
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
 import importlib
 from pyrogram import idle
@@ -62,9 +65,6 @@ async def init():
 
     await userbot.start()
     await StreamController.start()
-
-    # 🛑 تم إزالة استدعاء StreamController.stream_call() الوهمي لأنه غير موجود ويسبب كراش
-    # PyTgCalls الحديث لا يحتاج لهذا الاتصال الوهمي للبقاء حياً.
 
     await StreamController.decorators()
     LOGGER("AnnieXMedia").info("✅ Annie Music Bot Started Successfully.")
