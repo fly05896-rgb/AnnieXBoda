@@ -4,7 +4,6 @@ import asyncio
 import logging
 
 # 🛠️ إضافة المطور: تشتغل فقط عند الطلب من الكونسول
-# لو متغير البيئة "DEBUG_NTG" قيمته "1"، هيطبع تفاصيل ntgcalls
 if os.environ.get("DEBUG_NTG") == "1":
     logging.basicConfig(
         format="[%(levelname) 4s/%(asctime)s] %(name)s: %(message)s",
@@ -12,23 +11,16 @@ if os.environ.get("DEBUG_NTG") == "1":
     logging.getLogger('ntgcalls').setLevel(logging.DEBUG)
     print("🚨 تم تفعيل وضع الـ DEBUG لمكتبة ntgcalls بناءً على طلبك من الكونسول 🚨")
 
-
-# 🚀 الضربة الاستباقية: إنشاء Event Loop وتثبيتها قبل استدعاء أي ملف!
-# ده بيجبر MongoDB و Pyrogram وكل المكتبات إنها تستخدم نفس الـ Loop دي من البداية.
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# 🚀 الطريقة القياسية لـ Python 3.12+ لتهيئة الـ Event Loop دون أخطاء Deprecation
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 import importlib
 from pyrogram import idle
 from pytgcalls.exceptions import NoActiveGroupCall
 
-# إصلاح المسارات
 sys.path.insert(0, os.getcwd())
 
-# دلوقتي لما الملفات دي تتعملها Import، هتمسك في الـ Loop اللي جهزناها فوق بأمان تام
 import config
 from AnnieXMedia import LOGGER, app, userbot
 from AnnieXMedia.core.call import StreamController
@@ -71,13 +63,8 @@ async def init():
     await userbot.start()
     await StreamController.start()
 
-    try:
-        await StreamController.stream_call("http://docs.evostream.com/sample_content/assets/sintel1m720p.mp4")
-    except NoActiveGroupCall:
-        LOGGER("AnnieXMedia").error("❌ Please turn on the voice chat of your log group/channel. Bot stopped...")
-        sys.exit()
-    except Exception:
-        pass
+    # 🛑 تم إزالة استدعاء StreamController.stream_call() الوهمي لأنه غير موجود ويسبب كراش
+    # PyTgCalls الحديث لا يحتاج لهذا الاتصال الوهمي للبقاء حياً.
 
     await StreamController.decorators()
     LOGGER("AnnieXMedia").info("✅ Annie Music Bot Started Successfully.")
@@ -91,7 +78,6 @@ async def init():
 
 if __name__ == "__main__":
     try:
-        # نشغل البوت على اللوب اللي جهزناها فوق خالص، ومفيش أي تعارض هيحصل!
         loop.run_until_complete(init())
     except KeyboardInterrupt:
         LOGGER("AnnieXMedia").info("🛑 Bot process killed by user (Ctrl+C).")
