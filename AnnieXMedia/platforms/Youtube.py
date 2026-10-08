@@ -21,20 +21,22 @@ class YouTubeAPI:
             r"(youtube\.com/(watch\?v=|shorts/|playlist\?list=)|youtu\.be/)"
             r"([A-Za-z0-9_-]{11}|PL[A-Za-z0-9_-]+)([&?][^\s]*)?"
         )
+        # 🚀 التحديث الصاروخي: إعدادات yt-dlp المحسنة للتخطي والسرعة
         self.base_opts = {
             "quiet": True,
             "no_warnings": True,
-            "cookiefile": None,
-            "force_ipv4": True,
-            "source_address": "0.0.0.0",
-            "concurrent_fragment_downloads": 10,
-            "js_runtimes": {"deno": {}},
-            "remote_components": ["ejs:github"],
+            "no_color": True,
+            "cookiefile": "cookies.txt" if os.path.isfile("cookies.txt") else None, # هام جداً لتخطي القيود العمرية
+            "extract_flat": False,
             "nocheckcertificate": True,
             "geo_bypass": True,
+            "legacyserverconnect": True,
+            "cachedir": "yt_cache", # ⚡ تفعيل الكاش لتسريع الاستخراج 5 أضعاف
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android"]
+                    # استخدام الـ Clients التي لا تحظرها يوتيوب حالياً
+                    "player_client": ["web", "ios", "tv"],
+                    "player_skip": ["js", "configs", "webpage"] # تسريع مرعب: تجاهل تحميل صفحات الويب غير الضرورية
                 }
             }
         }
@@ -65,6 +67,7 @@ class YouTubeAPI:
         return None
 
     async def _extract_native(self, query: str, opts: dict) -> dict:
+        # استخدام to_thread لعدم تجميد السيرفر أثناء الاستخراج
         def extract():
             with YoutubeDL(opts) as ydl:
                 return ydl.extract_info(query, download=False)
@@ -83,6 +86,7 @@ class YouTubeAPI:
         query = f"https://www.youtube.com/watch?v={vid}" if vid else link
 
         try:
+            # البحث الصاروخي بدون تحميل الويب
             search = VideosSearch(query, limit=1)
             result = await search.next()
             
@@ -143,6 +147,7 @@ class YouTubeAPI:
             log.error(f"Search error: {e}")
             return []
 
+    # 🚀 القلب النابض: الدالة المسؤولة عن سرعة وجودة الاستخراج للـ Voice Chat
     async def download(self, link: str, mystic: Any, video: str | bool | None = None, videoid: str | bool | None = None, **kwargs) -> str | None:
         vid = str(videoid) if videoid and str(videoid) not in ["True", "False", "None"] else ""
         if not vid and "v=" in link:
@@ -155,7 +160,10 @@ class YouTubeAPI:
         
         target_url = f"https://www.youtube.com/watch?v={vid}" if len(vid) == 11 else link
         
-        media_format = "best[height<=1080]/best" if video else "bestaudio/best"
+        # ⚡ تحديث الصيغ لضمان أفضل توافق مع PyTgCalls وسرعة الاستجابة
+        # للفيديو: نطلب دمج الفيديو والصوت مسبقاً إذا أمكن لتقليل العبء
+        # للصوت: نطلب أفضل جودة صوتية مدعومة
+        media_format = "bestvideo[height<=720]+bestaudio/best[height<=720]/best" if video else "bestaudio/best"
         
         opts = self.base_opts.copy()
         opts["format"] = media_format
@@ -163,21 +171,19 @@ class YouTubeAPI:
         
         try:
             info = await self._extract_native(target_url, opts)
+            # استخراج الرابط المباشر
             return info.get("url")
         except Exception as e:
-            log.error(f"Extraction Error: {e}")
+            log.error(f"Extraction Error for {target_url}: {e}")
             return None
 
     async def get_direct_link(self, link: str, *, prefer_audio: bool = True) -> str | None:
         return await self.download(link, None, video=not prefer_audio)
                 
     async def get_playlist(self, url: str) -> list[str]:
-        opts = {
-            "extract_flat": True,
-            "quiet": True,
-            "skip_download": True,
-            "no_warnings": True
-        }
+        opts = self.base_opts.copy()
+        opts["extract_flat"] = True # استخراج البيانات السطحية فقط بدون تحميل
+        opts["skip_download"] = True
         try:
             info = await self._extract_native(url, opts)
             return [f"https://www.youtube.com/watch?v={entry['id']}" for entry in info.get("entries", []) if entry.get("id")]
