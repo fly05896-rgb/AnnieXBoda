@@ -83,6 +83,40 @@ async def stream(
             title = result.get("title", "").title()
             duration_min = result.get("duration_min", "00:00")
 
+            is_active = await is_active_chat(chat_id)
+
+            # 🔴 التحديث: إضافة احترام الطابور (Queue) لوضع الملفات المرفوعة
+            if is_active and not forceplay:
+                await put_queue(
+                    chat_id,
+                    original_chat_id,
+                    f"vid_{vidid}",
+                    title,
+                    duration_min,
+                    user_name,
+                    vidid,
+                    user_id,
+                    "video" if is_video else "audio",
+                )
+                position = len(db.get(chat_id)) - 1
+                button = aq_markup(_, chat_id)
+                try:
+                    await mystic.edit_text(
+                        text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                        reply_markup=InlineKeyboardMarkup(button),
+                    )
+                except Exception:
+                    await safe_delete(mystic)
+                    await app.send_message(
+                        original_chat_id,
+                        text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                        reply_markup=InlineKeyboardMarkup(button),
+                    )
+                return
+
+            if not forceplay:
+                db[chat_id] = []
+
             try:
                 # 🚀 استلام قيمة واحدة (رابط مباشر) من سيرفر Fly.io
                 file_path = await YouTube.download(
@@ -106,7 +140,6 @@ async def stream(
                 traceback.print_exc()
                 return await app.send_message(original_chat_id, text=f"Error: [{type(e).__name__}] {e}")
 
-            db[chat_id] = []
             await put_queue(
                 chat_id,
                 original_chat_id,
@@ -139,6 +172,11 @@ async def stream(
         case "playlist":
             msg = f"{_['play_19']}\n\n"
             count = 0
+            
+            # 🔴 التحديث: منع تكرار تفريغ الطابور أثناء تحميل القائمة لمعالجة ثغرة الـ Race Condition
+            is_active = await is_active_chat(chat_id)
+            if not is_active and not forceplay:
+                db[chat_id] = []
 
             for search in result:
                 if count == config.PLAYLIST_FETCH_LIMIT:
@@ -151,7 +189,7 @@ async def stream(
                     traceback.print_exc()
                     continue
 
-                if str(duration_min) == "None":
+                if str(duration_min) == "None" or duration_min is None:
                     continue
                 if duration_sec and duration_sec > config.DURATION_LIMIT:
                     continue
@@ -172,9 +210,6 @@ async def stream(
                     count += 1
                     msg += f"{count}. {title[:70]}\n{_['play_20']} {position}\n\n"
                     continue
-
-                if not forceplay:
-                    db[chat_id] = []
 
                 try:
                     # 🚀 استلام قيمة واحدة للرابط المباشر في قوائم التشغيل
@@ -303,10 +338,18 @@ async def stream(
                 button = aq_markup(_, chat_id)
 
                 if is_index:
-                    await mystic.edit_text(
-                        text=_["queue_4"].format(position, title[:27], duration_min, user_name),
-                        reply_markup=InlineKeyboardMarkup(button),
-                    )
+                    try:
+                        await mystic.edit_text(
+                            text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                            reply_markup=InlineKeyboardMarkup(button),
+                        )
+                    except Exception:
+                        await safe_delete(mystic)
+                        await app.send_message(
+                            original_chat_id,
+                            text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                            reply_markup=InlineKeyboardMarkup(button),
+                        )
                 else:
                     await safe_delete(mystic)
                     await app.send_message(
