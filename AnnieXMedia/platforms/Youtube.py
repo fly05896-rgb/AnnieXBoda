@@ -21,20 +21,21 @@ class YouTubeAPI:
             r"(youtube\.com/(watch\?v=|shorts/|playlist\?list=)|youtu\.be/)"
             r"([A-Za-z0-9_-]{11}|PL[A-Za-z0-9_-]+)([&?][^\s]*)?"
         )
+        
+        # 🚀 إعدادات yt-dlp المتوافقة مع تحديثات 2026 
         self.base_opts = {
             "quiet": True,
             "no_warnings": True,
             "no_color": True,
-            "cookiefile": "cookies.txt" if os.path.isfile("cookies.txt") else None, 
+            # التوافق مع القيود العمرية عن طريق الكوكيز (إن وجد)
+            "cookiefile": "cookies.txt" if os.path.isfile("cookies.txt") else None,
             "extract_flat": False,
             "nocheckcertificate": True,
             "geo_bypass": True,
-            "legacyserverconnect": True,
-            "cachedir": "yt_cache", 
+            # السماح لـ yt-dlp باستخدام العملاء الافتراضيين الحديثين (web, ios, tv)
             "extractor_args": {
                 "youtube": {
                     "player_client": ["web", "ios", "tv"],
-                    "player_skip": ["js", "configs", "webpage"] 
                 }
             }
         }
@@ -64,12 +65,14 @@ class YouTubeAPI:
                     log.warning(f"Error parsing entity: {e}")
         return None
 
+    # دالة استخراج البيانات في مسار (Thread) منفصل لمنع تجميد البوت
     async def _extract_native(self, query: str, opts: dict) -> dict:
         def extract():
             with YoutubeDL(opts) as ydl:
                 return ydl.extract_info(query, download=False)
         return await asyncio.to_thread(extract)
 
+    # 🚀 جلب تفاصيل التراك بسرعة باستخدام VideosSearch
     async def track(self, link: str, videoid: str | bool | None = None) -> tuple[dict[str, Any], str]:
         vid = str(videoid) if videoid and str(videoid) not in ["True", "False", "None"] else ""
         if not vid and "v=" in link:
@@ -104,6 +107,7 @@ class YouTubeAPI:
                     "duration_min": duration,
                     "thumb": thumb_url,
                 }, v_id
+            
             return {"title": "Unknown", "duration_min": "0:00", "thumb": "", "vidid": vid, "link": link}, vid
         except Exception as e:
             log.error(f"Track Search error: {e}")
@@ -143,6 +147,7 @@ class YouTubeAPI:
             log.error(f"Search error: {e}")
             return []
 
+    # 🚀 قلب عملية التشغيل (استخراج الـ URL المباشر للفيديو/الصوت)
     async def download(self, link: str, mystic: Any, video: str | bool | None = None, videoid: str | bool | None = None, **kwargs) -> str | None:
         vid = str(videoid) if videoid and str(videoid) not in ["True", "False", "None"] else ""
         link = str(link) if link else ""
@@ -155,19 +160,21 @@ class YouTubeAPI:
             except IndexError:
                 pass
         
-        # 🛡️ التصحيح الجوهري لمنع خطأ empty url
+        # 🛡️ تنظيف معرف الفيديو وبناء الرابط بشكل صارم لمنع الأخطاء
         target_url = ""
         if vid and len(vid) >= 11:
-            # تنظيف الـ vidid في حالة تم تمريره مع لاحقة مثل "_v" (والتي يستخدمها ملف stream للتمييز)
             clean_vid = vid.replace("_v", "")[:11] 
             target_url = f"https://www.youtube.com/watch?v={clean_vid}"
         elif link and link.startswith("http"):
             target_url = link
             
         if not target_url:
-            log.error(f"Download Error: Both link and videoid are invalid. link='{link}', videoid='{videoid}'")
+            log.error(f"Download Error: Invalid URL/ID. link='{link}', videoid='{videoid}'")
             return None
         
+        # ⚡ تحديد الصيغ بأمان لتجنب إرجاع `None` من يوتيوب
+        # إذا طلبنا فيديو: يفضل أفضل دمج للفيديو والصوت بجودة 720، وإذا لم يجد يحضر أفضل ما هو متاح
+        # إذا طلبنا صوت: يجلب أفضل جودة صوت
         media_format = "bestvideo[height<=720]+bestaudio/best[height<=720]/best" if video else "bestaudio/best"
         
         opts = self.base_opts.copy()
@@ -175,12 +182,30 @@ class YouTubeAPI:
         opts["noplaylist"] = True
         
         try:
+            # 🚀 استخراج الرابط المباشر من yt-dlp
             info = await self._extract_native(target_url, opts)
-            return info.get("url")
+            
+            if not info:
+                log.error(f"Extraction Error: yt-dlp returned None for {target_url}")
+                return None
+                
+            # يوتيوب يعيد الرابط المباشر داخل الـ 'url'، أو داخل قائمة الـ 'formats' في بعض الحالات
+            direct_url = info.get("url")
+            
+            # محاولة احتياطية لجلب الرابط إذا لم يكن في الجذر الرئيسي لـ info
+            if not direct_url and "formats" in info:
+                for f in info["formats"]:
+                    if f.get("url") and f.get("vcodec") != "none" if video else f.get("acodec") != "none":
+                        direct_url = f.get("url")
+                        break
+                        
+            return direct_url
+            
         except Exception as e:
             log.error(f"Extraction Error for {target_url}: {e}")
             return None
 
+    # دالة مساعدة للحصول على الرابط المباشر
     async def get_direct_link(self, link: str, *, prefer_audio: bool = True) -> str | None:
         return await self.download(link, None, video=not prefer_audio)
                 
@@ -190,11 +215,14 @@ class YouTubeAPI:
         opts["skip_download"] = True
         try:
             info = await self._extract_native(url, opts)
+            if not info:
+                return []
             return [f"https://www.youtube.com/watch?v={entry['id']}" for entry in info.get("entries", []) if entry.get("id")]
         except Exception as e:
             log.error(f"Playlist extraction error: {e}")
             return []
 
+    # تحميل الصورة المصغرة (Thumbnail)
     async def download_thumb(self, thumbnail_url: str) -> str | None:
         if not thumbnail_url:
             return None
@@ -213,7 +241,7 @@ class YouTubeAPI:
 
     async def video(self, link: str, is_live: bool = False) -> tuple[int, str]:
         try:
-            url = await self.get_direct_link(link, prefer_audio=True)
+            url = await self.get_direct_link(link, prefer_audio=not is_live)
             if url:
                 return 1, url
             return 0, ""
