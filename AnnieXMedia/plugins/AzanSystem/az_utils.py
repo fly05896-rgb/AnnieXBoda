@@ -1,8 +1,3 @@
-# Authored By Certified Coders (c) 2026
-# System: Azan Maestro (Smooth Switch Edition)
-# Location: AnnieXMedia/plugins/AzanSystem/az_utils.py
-# FIXES: Prevent Stop/Start, Ensure Audio Continuity
-
 import asyncio
 import aiohttp
 import random
@@ -11,6 +6,8 @@ import pytz
 import re
 import os
 import functools
+import shlex  # للحماية من ثغرات الحقن
+from contextlib import suppress # لمعالجة الأخطاء بصمت واحترافية
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -85,7 +82,8 @@ async def check_rights(user_id: int, chat_id: int) -> bool:
     try:
         mem = await app.get_chat_member(chat_id, user_id)
         return mem.status in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]
-    except: return False
+    except Exception: 
+        return False
 
 async def get_chat_doc(chat_id: int) -> Dict[str, Any]:
     if chat_id in local_cache:
@@ -107,15 +105,13 @@ async def get_chat_doc(chat_id: int) -> Dict[str, Any]:
         return {}
 
 async def update_doc(chat_id: int, key: str, value, sub_key: str = None):
-    try:
+    with suppress(Exception):
         if sub_key:
             await settings_db.update_one({"chat_id": chat_id}, {"$set": {f"prayers.{sub_key}": value}}, upsert=True)
             if chat_id in local_cache: local_cache[chat_id].setdefault("prayers", {})[sub_key] = value
         else:
             await settings_db.update_one({"chat_id": chat_id}, {"$set": {key: value}}, upsert=True)
             if chat_id in local_cache: local_cache[chat_id][key] = value
-    except Exception:
-        pass
 
 @retry_operation(max_retries=3)
 async def load_resources():
@@ -140,22 +136,20 @@ async def load_resources():
 async def prepare_assistant_membership(chat_id: int):
     try:
         userbot = await get_client(random.choice(assistants))
-        try:
-            await app.add_chat_members(chat_id, userbot.me.username)
+        me = await userbot.get_me() # تأمين قراءة بيانات الحساب
+        
+        with suppress(UserAlreadyParticipant, Exception):
+            await app.add_chat_members(chat_id, me.username)
             return True
-        except UserAlreadyParticipant:
-            return True
-        except Exception:
-            pass
 
         try:
-            await userbot.get_chat_member(chat_id, "me")
+            await userbot.get_chat_member(chat_id, me.id)
             return True 
         except UserNotParticipant:
             try:
                 try:
                     invite_link = await app.export_chat_invite_link(chat_id)
-                except:
+                except Exception:
                     chat = await app.get_chat(chat_id)
                     invite_link = chat.username
 
@@ -166,7 +160,7 @@ async def prepare_assistant_membership(chat_id: int):
                         await userbot.join_chat(str(invite_link))
                     await asyncio.sleep(1)
                     return True
-            except Exception as e:
+            except Exception:
                 return False
         except Exception:
             return True
@@ -187,18 +181,22 @@ async def _download_locally_guaranteed(url: str, filename_prefix: str) -> str:
         return path
     
     try:
+        # حماية ضد Shell Injection باستخدام shlex.quote
+        safe_url = shlex.quote(url)
+        safe_path = shlex.quote(path)
         proc = await asyncio.create_subprocess_shell(
-            f"yt-dlp -f 'bestaudio' -o '{path}' '{url}'",
+            f"yt-dlp -f 'bestaudio' -o {safe_path} {safe_url}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         await proc.communicate()
         if os.path.exists(path):
             return path
-    except: pass
+    except Exception: 
+        pass
 
     try:
-        if not "youtube" in url:
+        if "youtube" not in url:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as resp:
                     if resp.status == 200:
@@ -211,16 +209,12 @@ async def _download_locally_guaranteed(url: str, filename_prefix: str) -> str:
     return url
 
 async def _direct_join_call(chat_id, file_path):
-    # 🛑 التعديل الجوهري: حاول تغيير الاستريم أولاً (Change Stream)
     try:
-        # بننادي على skip_stream لأنها بتعمل change_stream داخلياً
-        # وده بيحافظ على المساعد جوه الكول
         await StreamController.skip_stream(chat_id, file_path, video=False)
         return True
     except Exception:
         pass
 
-    # لو فشل أو مش موجود، ادخل عادي
     candidates = ["join_call", "join_stream", "join", "start_stream", "start_call"]
     for name in candidates:
         fn = getattr(StreamController, name, None)
@@ -236,8 +230,8 @@ async def _direct_join_call(chat_id, file_path):
 async def start_azan_stream(chat_id: int, prayer_key: str, play_target: str = None, force_test: bool = False):
     if not force_test:
         doc = await get_chat_doc(chat_id)
-        if not doc.get("azan_active", True): return
-        if not doc.get("prayers", {}).get(prayer_key, True): return
+        if not doc.get("azan_active", True) or not doc.get("prayers", {}).get(prayer_key, True):
+            return
 
     try:
         res = CURRENT_RESOURCES.get(prayer_key)
@@ -246,8 +240,6 @@ async def start_azan_stream(chat_id: int, prayer_key: str, play_target: str = No
         final_file = play_target if play_target else res.get("link")
         if not final_file: return
 
-        # 🛑 إلغاء الـ Force Stop عشان المساعد ما يخرجش
-        # بننظف الداتابيز بس
         db[chat_id] = []
         await add_active_video_chat(chat_id)
         
@@ -269,27 +261,22 @@ async def start_azan_stream(chat_id: int, prayer_key: str, play_target: str = No
             "stream_mode": "local"
         })
 
-        # 3. التأكد من المساعد
         await prepare_assistant_membership(chat_id)
-
-        # 4. الانضمام (أو التبديل)
         success = await _direct_join_call(chat_id, final_file)
         
         if not success:
              return
 
-        # 5. إرسال التنبيهات
         if res.get("sticker"):
-            try: await app.send_sticker(chat_id, res["sticker"])
-            except: pass
+            with suppress(Exception):
+                await app.send_sticker(chat_id, res["sticker"])
         
         caption = f"🕌 حان الان موعد اذان {res.get('name', '')} بالتوقيت المحلي لمدينة القاهرة."
-        try: await app.send_message(chat_id, caption)
-        except: pass
+        with suppress(Exception):
+            await app.send_message(chat_id, caption)
 
-        # 6. التسجيل
         if not force_test:
-            try:
+            with suppress(Exception):
                 now = datetime.now(CAIRO_TZ)
                 log_key = f"{chat_id}_{now.strftime('%Y-%m-%d_%H:%M')}"
                 await azan_logs_db.insert_one({
@@ -298,14 +285,15 @@ async def start_azan_stream(chat_id: int, prayer_key: str, play_target: str = No
                     "prayer_key": prayer_key,
                     "time": now.strftime("%I:%M %p")
                 })
-            except: pass
 
     except Exception as e:
         logger.error(f"Azan Stream Failed {chat_id}: {e}")
-        if force_test: await app.send_message(chat_id, f"خطأ: {e}")
+        if force_test: 
+            with suppress(Exception):
+                await app.send_message(chat_id, f"خطأ: {e}")
 
 # ==================================================================
-# [SECTION 4] Broadcaster & Scheduler
+# [SECTION 4] Broadcaster & Scheduler (Optimized for Concurrency)
 # ==================================================================
 
 async def broadcast_azan(prayer_key: str):
@@ -314,7 +302,7 @@ async def broadcast_azan(prayer_key: str):
     if not res: return
     
     link = res["link"]
-    local_file_path = None
+    local_file_path = link
 
     try:
         logger.info("Downloading Azan file locally...")
@@ -322,46 +310,42 @@ async def broadcast_azan(prayer_key: str):
         logger.info(f"Broadcast File Ready: {local_file_path}")
     except Exception as e:
         logger.error(f"Download failed: {e}")
-        local_file_path = link
 
-    count = 0
+    # استخدام التزامن (Concurrency) لضمان دخول البوت كل المجموعات في نفس اللحظة
+    tasks = []
     async for doc in settings_db.find({"azan_active": True}):
-        c_id = doc.get("chat_id")
-        if c_id:
-            try:
-                await start_azan_stream(c_id, prayer_key, local_file_path)
-                count += 1
-                await asyncio.sleep(1.0) 
-            except Exception as e:
-                logger.error(f"Error broadcasting to {c_id}: {e}")
-
-    logger.info(f"Azan Broadcast Finished for {count} chats.")
+        if c_id := doc.get("chat_id"):
+            tasks.append(start_azan_stream(c_id, prayer_key, local_file_path))
+    
+    if tasks:
+        # ننفذ كل المهام معاً. لن ننتظر مجموعة تلو الأخرى.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        count = sum(1 for r in results if not isinstance(r, Exception))
+        logger.info(f"Azan Broadcast Finished for {count} chats simultaneously.")
 
 async def send_duas_batch(dua_list, setting_key, title, target_chat_id=None):
-    if target_chat_id:
-        selected = random.sample(dua_list, min(4, len(dua_list)))
-        text = f"<b>{title}</b>\n\n" + "\n\n".join([f"• {d} 🤍" for d in selected])
-        text += "\n\n<b>تقبل الله منا ومنكم</b>"
-        if CURRENT_DUA_STICKER:
-             try: await app.send_sticker(target_chat_id, CURRENT_DUA_STICKER)
-             except: pass
-        await app.send_message(target_chat_id, text)
-        return
-
     selected = random.sample(dua_list, min(4, len(dua_list)))
     text = f"<b>{title}</b>\n\n" + "\n\n".join([f"• {d} 🤍" for d in selected])
     text += "\n\n<b>تقبل الله منا ومنكم</b>"
 
+    async def send_single_dua(c_id):
+        with suppress(Exception):
+            if CURRENT_DUA_STICKER:
+                await app.send_sticker(c_id, CURRENT_DUA_STICKER)
+            await app.send_message(c_id, text)
+
+    if target_chat_id:
+        await send_single_dua(target_chat_id)
+        return
+
+    # استخدام التزامن لإرسال الأذكار
+    tasks = []
     async for entry in settings_db.find({setting_key: True}):
-        try:
-            c_id = entry.get("chat_id")
-            if c_id:
-                if CURRENT_DUA_STICKER:
-                    try: await app.send_sticker(c_id, CURRENT_DUA_STICKER)
-                    except: pass
-                await app.send_message(c_id, text)
-                await asyncio.sleep(1.5)
-        except: continue
+        if c_id := entry.get("chat_id"):
+            tasks.append(send_single_dua(c_id))
+            
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 # ==================================================================
 # [SECTION 5] Init & Updates
@@ -376,7 +360,8 @@ async def get_azan_times() -> Optional[Dict[str, str]]:
                 if resp.status == 200:
                     data = await resp.json()
                     return data["data"]["timings"]
-    except: return None
+    except Exception: 
+        return None
 
 async def update_scheduler():
     await load_resources()
@@ -392,13 +377,16 @@ async def update_scheduler():
             try:
                 h, m = map(int, t_str.split(":"))
                 scheduler.add_job(broadcast_azan, "cron", hour=h, minute=m, args=[key], id=f"azan_{key}")
-            except: continue
+            except Exception: 
+                continue
     logger.info("Scheduler Updated with new times.")
 
 def init_azan_scheduler():
     if not scheduler.running:
-        scheduler.add_job(lambda: asyncio.create_task(update_scheduler()), "cron", hour=0, minute=5)
-        scheduler.add_job(lambda: asyncio.create_task(send_duas_batch(MORNING_DUAS, "dua_active", "أذكار الصباح")), "cron", hour=7, minute=0)
-        scheduler.add_job(lambda: asyncio.create_task(send_duas_batch(NIGHT_DUAS, "night_dua_active", "أذكار المساء")), "cron", hour=20, minute=0)
+        scheduler.add_job(update_scheduler, "cron", hour=0, minute=5)
+        scheduler.add_job(send_duas_batch, "cron", hour=7, minute=0, args=[MORNING_DUAS, "dua_active", "أذكار الصباح"])
+        scheduler.add_job(send_duas_batch, "cron", hour=20, minute=0, args=[NIGHT_DUAS, "night_dua_active", "أذكار المساء"])
         scheduler.start()
-        asyncio.get_event_loop().create_task(update_scheduler())
+        
+        with suppress(Exception):
+            asyncio.get_event_loop().create_task(update_scheduler())
