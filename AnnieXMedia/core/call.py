@@ -66,25 +66,20 @@ counter = {}
 
 
 def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> MediaStream:
-    """بناء مجرى البيانات وفقاً لأحدث معايير MediaStream مع تخطي حمايات 2026"""
+    """بناء مجرى البيانات بأقل زمن انتقال (Zero-Latency Buffering)"""
     path = str(path)
-    
-    # 🔴 التعديلات الصاروخية ليتوافق مع WebRTC (m152) وتحسينات FFmpeg الجديدة:
-    base_flags = "-probesize 10M -analyzeduration 10M -threads 0 "
+    is_url = path.startswith(("http://", "https://"))
+
+    # تقليل probesize و analyzeduration لبدء الصوت فوراً + إعادة الاتصال التلقائي للروابط المباشرة
+    reconnect_flags = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 " if is_url else ""
+    base_flags = f"{reconnect_flags}-fflags nobuffer -probesize 32k -analyzeduration 0 -threads 0 "
     final_ffmpeg = base_flags + ffmpeg_opts
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-    
-    # 🚀 التحديث الأهم بناءً على توثيق PyTgCalls: 
-    # لا نقوم بتمرير audio_parameters أو video_parameters. المكتبة تختار الجودة المناسبة تلقائياً.
+
     return MediaStream(
         media_path=path,
         video_flags=MediaStream.Flags.REQUIRED if video else MediaStream.Flags.IGNORE,
         audio_flags=MediaStream.Flags.REQUIRED,
         ffmpeg_parameters=final_ffmpeg,
-        headers=headers
     )
 
 
