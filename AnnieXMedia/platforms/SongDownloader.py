@@ -1,6 +1,3 @@
-# Authored By Certified Systems Architect
-# Zero-Latency Downloader (Dynamic Clients: tv_embedded / android + IPv4 Forced)
-
 import asyncio
 import os
 import logging
@@ -8,7 +5,6 @@ import yt_dlp
 from concurrent.futures import ThreadPoolExecutor
 
 try:
-    # تم التعديل إلى aio لضمان التوافق مع الإصدار الحديث
     from youtubesearchpython.aio import VideosSearch
     HAS_SEARCH = True
 except ImportError:
@@ -17,16 +13,18 @@ except ImportError:
 logging.basicConfig(level=logging.ERROR)
 def LOGGER(name): return logging.getLogger(name)
 
+
 class Config:
     if os.path.exists("/dev/shm"):
         DOWNLOAD_PATH = "/dev/shm/AnnieSongDownloads"
     else:
         DOWNLOAD_PATH = os.path.abspath("downloads_songs")
-    
-    MAX_WORKERS = 10 
 
-if not os.path.exists(Config.DOWNLOAD_PATH):
-    os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
+    MAX_WORKERS = 10
+
+
+os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
+
 
 class SongDownloaderAPI:
     def __init__(self):
@@ -36,21 +34,26 @@ class SongDownloaderAPI:
 
     def set_limit(self, limit: int):
         self.playlist_limit = int(limit)
+
     def open_limit(self):
-        self.playlist_limit = 0 
+        self.playlist_limit = 0
+
     def reset_limit(self):
         self.playlist_limit = 10
+
     def enable_quality(self):
         self.force_high_quality = True
+
     def disable_quality(self):
         self.force_high_quality = False
-    
-    async def download(self, link: str, is_video: bool = False):
-        if "googleusercontent.com" in link:
-             try: link = f"https://www.youtube.com/watch?v={link.split('v=')[1]}"
-             except: pass
 
-        # البحث السريع
+    async def download(self, link: str, is_video: bool = False):
+        if "googleusercontent.com" in link and "v=" in link:
+            try:
+                link = f"https://www.youtube.com/watch?v={link.split('v=')[1].split('&')[0]}"
+            except Exception:
+                pass
+
         if not link.startswith(("http", "www")) and HAS_SEARCH:
             try:
                 search = VideosSearch(link, limit=1)
@@ -60,26 +63,28 @@ class SongDownloaderAPI:
                     link = f"https://www.youtube.com/watch?v={vid}"
                 else:
                     link = f"ytsearch1:{link}"
-            except:
+            except Exception:
                 link = f"ytsearch1:{link}"
 
         loop = asyncio.get_running_loop()
-        
-        # 🎯 الذكاء في اختيار العميل بناءً على نتيجة الكونسول
+
+        # في yt-dlp 2026.08.19:
+        # visionos و android هما الأسرع لأن REQUIRE_JS_PLAYER = False
         if is_video:
-            # tv_embedded: الأسرع في جلب الـ HQ (2.69s) وبدون أخطاء
-            target_clients = ["tv_embedded"]
             if self.force_high_quality:
+                target_clients = ["visionos", "tv_samsung"]
                 fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
             else:
+                target_clients = ["visionos", "android"]
                 fmt = "b[ext=mp4][height<=480]/b[ext=mp4][height<=360]/b[ext=mp4]/best"
         else:
-            # android: الأسرع على الإطلاق (1.13s) للصوتيات
-            target_clients = ["android"]
+            target_clients = ["visionos", "android"]
             fmt = "ba[ext=m4a]/ba/b"
 
+        is_playlist = "list=" in link and "watch?v=" not in link
+
         def _download_native():
-            out_tmpl = os.path.join(Config.DOWNLOAD_PATH, "%(title)s.%(ext)s")
+            out_tmpl = os.path.join(Config.DOWNLOAD_PATH, "%(id)s.%(ext)s")
 
             ydl_opts = {
                 "format": fmt,
@@ -87,47 +92,46 @@ class SongDownloaderAPI:
                 "quiet": True,
                 "no_warnings": True,
                 "nocheckcertificate": True,
-                "cookiefile": None, 
-                
+                "cookiefile": None,
                 "force_ipv4": True,
                 "source_address": "0.0.0.0",
-                "geo_bypass": False, 
-                
-                "js_runtimes": {"node": {}},
+                "geo_bypass": False,
+                "js_runtimes": {"node": {}, "deno": {}},
                 "remote_components": ["ejs:github"],
-                
-                # توجيه العميل الفائز فقط لعدم إهدار الوقت
                 "extractor_args": {
                     "youtube": {
-                        "player_client": target_clients
+                        "player_client": target_clients,
+                        "player_skip": ["webpage", "configs", "initial_data", "js"],
+                        "skip": ["hls", "dash", "translated_subs"],
+                        "formats": ["missing_pot"],
+                        "fetch_pot": ["never"],
                     }
                 },
-                
-                "concurrent_fragment_downloads": 10,  
-                "http_chunk_size": 10485760,         
-                "buffersize": 1024 * 1024 * 5,       
-                "retries": 15,                       
-                
-                "noplaylist": False, 
+                "concurrent_fragment_downloads": 10,
+                "http_chunk_size": 10485760,
+                "buffersize": 1024 * 1024 * 5,
+                "retries": 5,
+                "socket_timeout": 10,
+                "noplaylist": not is_playlist,
                 "ignoreerrors": True,
-                "trim_file_name": 50,
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
             }
-            
-            if "list=" in link and self.playlist_limit > 0:
+
+            if is_playlist and self.playlist_limit > 0:
                 ydl_opts["playlistend"] = self.playlist_limit
-            
+
             if is_video and self.force_high_quality:
                 ydl_opts["merge_output_format"] = "mp4"
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(link, download=True)
-                    if not info: return None
-                        
-                    if 'entries' in info:
-                        entries = [e for e in info['entries'] if e]
-                        if entries: return ydl.prepare_filename(entries[0])
+                    if not info:
+                        return None
+
+                    if "entries" in info:
+                        entries = [e for e in info["entries"] if e]
+                        if entries:
+                            return ydl.prepare_filename(entries[0])
                     return ydl.prepare_filename(info)
             except Exception as e:
                 LOGGER("SongDownloader").error(f"Download Error: {e}")
@@ -136,10 +140,11 @@ class SongDownloaderAPI:
         try:
             file_path = await loop.run_in_executor(self.pool, _download_native)
             if file_path and os.path.exists(file_path):
-                return file_path, False 
+                return file_path, False
         except Exception:
             pass
 
         return None, False
+
 
 SongDownloader = SongDownloaderAPI()
