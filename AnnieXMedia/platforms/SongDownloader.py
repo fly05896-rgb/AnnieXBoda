@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 
 import yt_dlp
@@ -14,6 +15,8 @@ except ImportError:
 logging.basicConfig(level=logging.ERROR)
 def LOGGER(name): return logging.getLogger(name)
 
+HAS_ARIA2C = bool(shutil.which("aria2c"))
+
 
 class Config:
     if os.path.exists("/dev/shm"):
@@ -21,7 +24,7 @@ class Config:
     else:
         DOWNLOAD_PATH = os.path.abspath("downloads_songs")
 
-    MAX_WORKERS = 10
+    MAX_WORKERS = 12
 
 
 os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
@@ -67,6 +70,16 @@ class SongDownloaderAPI:
             except Exception:
                 link = f"ytsearch1:{link}"
 
+        # إذا كان الملف موجوداً بالفعل في الرام (/dev/shm) نعيده فوراً في 0ms
+        if "v=" in link:
+            vid_id = link.split("v=")[1].split("&")[0]
+            if len(vid_id) == 11:
+                exts = (".mp4",) if is_video else (".m4a", ".mp3", ".webm")
+                for ext in exts:
+                    existing = os.path.join(Config.DOWNLOAD_PATH, f"{vid_id}{ext}")
+                    if os.path.exists(existing) and os.path.getsize(existing) > 1024:
+                        return existing, False
+
         loop = asyncio.get_running_loop()
 
         if is_video:
@@ -74,11 +87,17 @@ class SongDownloaderAPI:
                 target_clients = ["visionos", "tv_samsung"]
                 fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
             else:
+                # صيغة 18 (360p MP4 مدمجة جاهزة) تنزل في أجزاء من الثانية بدون دمج FFmpeg
                 target_clients = ["visionos", "android"]
-                fmt = "b[ext=mp4][height<=480]/b[ext=mp4][height<=360]/b[ext=mp4]/best"
+                fmt = "18/b[ext=mp4][height<=360]/b[ext=mp4][height<=480]/b[ext=mp4]/best"
         else:
             target_clients = ["visionos", "android"]
-            fmt = "ba[ext=m4a]/ba/b"
+            # صيغة 139/140 (m4a أصلية خفيفة جداً وسريعة الرفع)
+            fmt = (
+                "140/ba[ext=m4a]/ba/b"
+                if self.force_high_quality
+                else "139/140/ba[abr<=128][ext=m4a]/ba[ext=m4a]/ba/b"
+            )
 
         is_playlist = "list=" in link and "watch?v=" not in link
 
@@ -106,14 +125,29 @@ class SongDownloaderAPI:
                         "fetch_pot": ["never"],
                     }
                 },
-                "concurrent_fragment_downloads": 10,
+                "concurrent_fragment_downloads": 16,
                 "http_chunk_size": 10485760,
                 "buffersize": 1024 * 1024 * 5,
-                "retries": 5,
-                "socket_timeout": 10,
+                "retries": 3,
+                "socket_timeout": 8,
                 "noplaylist": not is_playlist,
                 "ignoreerrors": True,
             }
+
+            # استخدام aria2c بـ 16 اتصالاً متوازياً عند توفره في النظام (موجود في الـ Dockerfile)
+            if HAS_ARIA2C and not (is_video and self.force_high_quality):
+                ydl_opts["external_downloader"] = "aria2c"
+                ydl_opts["external_downloader_args"] = {
+                    "aria2c": [
+                        "-x16",
+                        "-s16",
+                        "-j16",
+                        "-k1M",
+                        "--file-allocation=none",
+                        "--console-log-level=error",
+                        "--summary-interval=0",
+                    ]
+                }
 
             if is_playlist and self.playlist_limit > 0:
                 ydl_opts["playlistend"] = self.playlist_limit
