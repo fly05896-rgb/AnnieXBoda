@@ -6,12 +6,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import yt_dlp
 
-try:
-    from youtubesearchpython.aio import VideosSearch
-    HAS_SEARCH = True
-except ImportError:
-    HAS_SEARCH = False
-
 logging.basicConfig(level=logging.ERROR)
 def LOGGER(name): return logging.getLogger(name)
 
@@ -24,10 +18,12 @@ class Config:
     else:
         DOWNLOAD_PATH = os.path.abspath("downloads_songs")
 
+    CACHE_DIR = "/tmp/ytdlp_cache"
     MAX_WORKERS = 12
 
 
 os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
+os.makedirs(Config.CACHE_DIR, exist_ok=True)
 
 
 class SongDownloaderAPI:
@@ -58,19 +54,19 @@ class SongDownloaderAPI:
             except Exception:
                 pass
 
-        if not link.startswith(("http", "www")) and HAS_SEARCH:
+        # استخدام البحث السريع عبر IPv4 من YouTubeAPI بدلاً من VideosSearch المعطل
+        if not link.startswith(("http", "www")):
             try:
-                search = VideosSearch(link, limit=1)
-                result = await search.next()
-                if result and "result" in result and len(result["result"]) > 0:
-                    vid = result["result"][0]["id"]
-                    link = f"https://www.youtube.com/watch?v={vid}"
+                from AnnieXMedia.platforms.Youtube import YouTube
+                results = await YouTube.search(link, limit=1)
+                if results and results[0].get("vidid"):
+                    link = f"https://www.youtube.com/watch?v={results[0]['vidid']}"
                 else:
                     link = f"ytsearch1:{link}"
             except Exception:
                 link = f"ytsearch1:{link}"
 
-        # إذا كان الملف موجوداً بالفعل في الرام (/dev/shm) نعيده فوراً في 0ms
+        # فحص وجود الملف مسبقاً في الرام (/dev/shm)
         if "v=" in link:
             vid_id = link.split("v=")[1].split("&")[0]
             if len(vid_id) == 11:
@@ -84,20 +80,24 @@ class SongDownloaderAPI:
 
         if is_video:
             if self.force_high_quality:
-                target_clients = ["visionos", "tv_samsung"]
-                fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+                target_clients = ["tv_samsung", "visionos"]
+                fmt = "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+                skip_js = []
             else:
-                # صيغة 18 (360p MP4 مدمجة جاهزة) تنزل في أجزاء من الثانية بدون دمج FFmpeg
-                target_clients = ["visionos", "android"]
+                # للفيديو السريع: visionos يعطي صيغة 18 (360p MP4 مدمج جاهز) بدون JS
+                target_clients = ["visionos", "tv_samsung"]
                 fmt = "18/b[ext=mp4][height<=360]/b[ext=mp4][height<=480]/b[ext=mp4]/best"
+                skip_js = ["webpage", "configs", "initial_data", "js"]
         else:
-            target_clients = ["visionos", "android"]
-            # صيغة 139/140 (m4a أصلية خفيفة جداً وسريعة الرفع)
+            # للصوتيات: tv_samsung و android يوفران صيغة 139 (48kbps m4a بحجم ~1MB فقط!) وصيغة 140
+            # وضعنا tv_samsung و android أولاً لمنع visionos من إرجاع فيديو 12MB!
+            target_clients = ["tv_samsung", "android", "web_embedded"]
             fmt = (
                 "140/ba[ext=m4a]/ba/b"
                 if self.force_high_quality
-                else "139/140/ba[abr<=128][ext=m4a]/ba[ext=m4a]/ba/b"
+                else "139/249/250/140/ba[abr<=128][ext=m4a]/ba[ext=m4a]/ba/18"
             )
+            skip_js = ["webpage", "configs", "initial_data"]
 
         is_playlist = "list=" in link and "watch?v=" not in link
 
@@ -109,17 +109,19 @@ class SongDownloaderAPI:
                 "outtmpl": out_tmpl,
                 "quiet": True,
                 "no_warnings": True,
+                "noprogress": True,
                 "nocheckcertificate": True,
                 "cookiefile": None,
                 "force_ipv4": True,
                 "source_address": "0.0.0.0",
                 "geo_bypass": False,
-                "js_runtimes": {"node": {}, "deno": {}},
+                "cachedir": Config.CACHE_DIR,
+                "js_runtimes": {"deno": {}, "node": {}},
                 "remote_components": ["ejs:github"],
                 "extractor_args": {
                     "youtube": {
                         "player_client": target_clients,
-                        "player_skip": ["webpage", "configs", "initial_data", "js"],
+                        "player_skip": skip_js,
                         "skip": ["hls", "dash", "translated_subs"],
                         "formats": ["missing_pot"],
                         "fetch_pot": ["never"],
@@ -134,7 +136,6 @@ class SongDownloaderAPI:
                 "ignoreerrors": True,
             }
 
-            # استخدام aria2c بـ 16 اتصالاً متوازياً عند توفره في النظام (موجود في الـ Dockerfile)
             if HAS_ARIA2C and not (is_video and self.force_high_quality):
                 ydl_opts["external_downloader"] = "aria2c"
                 ydl_opts["external_downloader_args"] = {
@@ -146,6 +147,7 @@ class SongDownloaderAPI:
                         "--file-allocation=none",
                         "--console-log-level=error",
                         "--summary-interval=0",
+                        "--download-result=hide",
                     ]
                 }
 
