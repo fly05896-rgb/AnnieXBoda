@@ -71,16 +71,10 @@ class SongDownloaderAPI:
     def disable_quality(self):
         self.force_high_quality = False
 
-    def _get_cookie_file(self):
-        for p in ["cookies/cookies.txt", "AnnieXMedia/assets/cookies.txt", "cookies.txt"]:
-            if os.path.exists(p) and os.path.getsize(p) > 0:
-                return p
-        return None
-
     def _build_ydl_opts(self, is_video: bool, is_playlist: bool = False, out_tmpl: str | None = None) -> dict:
         if is_video:
             if self.force_high_quality:
-                target_clients = ["visionos", "android", "tv_samsung"]
+                target_clients = ["visionos", "android"]
                 fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
             else:
                 target_clients = ["visionos", "android"]
@@ -89,12 +83,13 @@ class SongDownloaderAPI:
             target_clients = ["android", "visionos"]
             fmt = "140/139/ba[ext=m4a]/ba/18/b"
 
+        # هام جداً: cookiefile يجب أن يكون None لأن android و visionos لا يدعمان الكوكيز في yt-dlp 2026.08.19
         opts = {
             "format": fmt,
             "quiet": True,
             "no_warnings": True,
             "nocheckcertificate": True,
-            "cookiefile": self._get_cookie_file(),
+            "cookiefile": None,
             "cachedir": Config.CACHE_DIR,
             "force_ipv4": True,
             "source_address": "0.0.0.0",
