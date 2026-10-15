@@ -164,7 +164,6 @@ class SongDownloaderAPI:
             "noplaylist": True,
             "overwrites": True,
             "cachedir": self.cache_dir,
-            " cookiefile": cookie_file,
             "cookiefile": cookie_file,
             "socket_timeout": 10,
             "retries": 2,
@@ -209,7 +208,7 @@ class SongDownloaderAPI:
                 if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                     return filepath, (1 if has_video_stream else 0)
 
-                 found = self._find_cached_file(vid_id, is_video)
+                found = self._find_cached_file(vid_id, is_video)
                 return found, (1 if has_video_stream else 0)
         except Exception as e:
             log.warning(f"Primary download error ({e}), retrying native HTTP...")
@@ -257,7 +256,6 @@ class SongDownloaderAPI:
 
                 if file_path and os.path.exists(file_path):
                     if not is_video:
-                        # لو الملف النازل من visionos فيه فيديو (itag 18 حجمه 10-12 ميجا)، نفصل الصوت الصافي (1.3 ميجا m4a) في 0.1 ثانية!
                         if has_video_stream or file_path.endswith(".mp4") or os.path.getsize(file_path) > 4 * 1024 * 1024:
                             file_path = await self._strip_video_to_m4a(file_path, vid_id)
                         elif not file_path.endswith((".m4a", ".mp3", ".ogg", ".opus")):
