@@ -574,9 +574,9 @@ async def list_command(client, message: Message):
     await mystic.delete()
     return await message.reply_text("اخـتار من الـقـائمة التالية.\n\n                                       ـ", reply_markup=_build_list_keyboard(results, message.from_user.id))
 
-# ==========================================================
-# معالج الضخ المباشر الفعلي للرفع
-# ==========================================================
+# 
+#
+#
 async def direct_download_handler(client, message, url_or_query, is_video_force=False, show_play_btn=False):
     mystic = await message.reply_text("جاري المعالجة...")
     try:
@@ -617,7 +617,7 @@ async def direct_download_handler(client, message, url_or_query, is_video_force=
                 return await mystic.delete()
             except: pass
 
-        await mystic.edit_text("جاري الضخ والرفع...")
+        await mystic.edit_text("جاري الرفـع ...")
         file_id = None
         ext = ".mp4" if is_video_force else ".m4a"
         virtual_name = f"{song[:40] or vidid}{ext}"
