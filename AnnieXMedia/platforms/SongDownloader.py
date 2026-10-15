@@ -1,8 +1,9 @@
 import asyncio
-import os
 import logging
-import yt_dlp
+import os
 from concurrent.futures import ThreadPoolExecutor
+
+import yt_dlp
 
 try:
     from youtubesearchpython.aio import VideosSearch
@@ -68,8 +69,6 @@ class SongDownloaderAPI:
 
         loop = asyncio.get_running_loop()
 
-        # في yt-dlp 2026.08.19:
-        # visionos و android هما الأسرع لأن REQUIRE_JS_PLAYER = False
         if is_video:
             if self.force_high_quality:
                 target_clients = ["visionos", "tv_samsung"]
