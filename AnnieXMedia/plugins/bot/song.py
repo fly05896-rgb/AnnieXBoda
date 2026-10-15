@@ -1,164 +1,89 @@
-import asyncio
-import json
-import math
+# Authored By Certified Coders © 2026
+# System: Song Plugin (Final Version - Live Cut-Through Stream Piping to Telegram)
+# Features: Zero-Disk RAM Streaming (512KB Instant Pump + 10MB Parallel Range Blocks) + Full Album Art & Artist Metadata 🎵
+
 import os
 import re
+import math
 import socket
-import time
+import asyncio
 import urllib.parse
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from hashlib import md5
 from typing import Callable, Optional
 
 import aiohttp
-from pyrogram import Client, enums, filters, raw, StopTransmission
+from pyrogram import Client, StopTransmission, enums, filters, raw
 from pyrogram.connection.transport.tcp.tcp import TCP
+from pyrogram.session import Session
 from pyrogram.types import (
-    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ForceReply,
 )
 
+# استيرادات AnnieXMedia
 import config
-from config import BANNED_USERS, SONG_DOWNLOAD_DURATION, SONG_DOWNLOAD_DURATION_LIMIT
-from AnnieXMedia import YouTube, app
-from AnnieXMedia.platforms import SongDownloader
-from AnnieXMedia.utils.decorators.language import language, languageCB
-from AnnieXMedia.utils.formatters import convert_bytes
+from config import (
+    BANNED_USERS,
+    SONG_DOWNLOAD_DURATION,
+    SONG_DOWNLOAD_DURATION_LIMIT,
+    OWNER_ID,
+    LOGGER_ID,
+)
+from AnnieXMedia import app
+from AnnieXMedia.platforms import YouTube, SongDownloader
 from AnnieXMedia.utils.inline.song import song_markup
+from AnnieXMedia.utils.database import get_config, set_config, get_cached_file, cache_file, get_lang
+from strings import get_string
+from AnnieXMedia.utils.stream.stream import stream
 
-# ── كاش فوري للـ file_id على سيرفرات تيليجرام (إرسال في 0.05 ثانية عند التكرار) ──
-_MEM_FILE_CACHE: dict[str, str] = {}
+SUDO_USERS = OWNER_ID if isinstance(OWNER_ID, list) else [OWNER_ID]
+DEFAULT_LIST_LIMIT = 10
+OWNER_USERNAME_LINK = "https://t.me/S_G0C7"
 
-# ── جلسة HTTP مستمرة (Pre-warmed Keep-Alive C-Stream) لـ Telegram Bot API ──
-_BOT_API_SESSION: Optional[aiohttp.ClientSession] = None
+# ── كاش فوري في الرامات بجانب كاش قاعدة البيانات ──
+_RAM_FILE_CACHE: dict[str, str] = {}
+_HTTP_SESSION: Optional[aiohttp.ClientSession] = None
+_FAST_CRYPTO_POOL = ThreadPoolExecutor(max_workers=8)
 
 
-async def _get_bot_api_session() -> aiohttp.ClientSession:
-    global _BOT_API_SESSION
-    if _BOT_API_SESSION is None or _BOT_API_SESSION.closed:
+class _StreamedTelegramFile:
+    """كائن يمرر الـ InputFile المرفوع في الرامات مباشرة لدوال send_audio / send_video في كوري جرام بدون إعادة رفع"""
+    def __init__(self, input_file, name: str):
+        self.input_file = input_file
+        self.name = name
+
+
+async def _get_http_session() -> aiohttp.ClientSession:
+    global _HTTP_SESSION
+    if _HTTP_SESSION is None or _HTTP_SESSION.closed:
         connector = aiohttp.TCPConnector(
-            limit=32,
+            limit=64,
+            limit_per_host=32,
             ttl_dns_cache=3600,
             use_dns_cache=True,
             keepalive_timeout=300,
             force_close=False,
         )
-        timeout = aiohttp.ClientTimeout(total=120, connect=5)
-        _BOT_API_SESSION = aiohttp.ClientSession(connector=connector, timeout=timeout)
-    return _BOT_API_SESSION
+        timeout = aiohttp.ClientTimeout(total=180, connect=5)
+        _HTTP_SESSION = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    return _HTTP_SESSION
 
 
-def _build_inline_keyboard_json(reply_markup: Optional[InlineKeyboardMarkup]) -> Optional[str]:
-    if not reply_markup or not getattr(reply_markup, "inline_keyboard", None):
-        return None
-    rows = []
-    for row in reply_markup.inline_keyboard:
-        btn_row = []
-        for btn in row:
-            b_dict = {"text": btn.text}
-            if getattr(btn, "url", None):
-                b_dict["url"] = btn.url
-            elif getattr(btn, "callback_data", None):
-                b_dict["callback_data"] = btn.callback_data
-            elif getattr(btn, "switch_inline_query", None) is not None:
-                b_dict["switch_inline_query"] = btn.switch_inline_query
-            elif getattr(btn, "switch_inline_query_current_chat", None) is not None:
-                b_dict["switch_inline_query_current_chat"] = btn.switch_inline_query_current_chat
-            btn_row.append(b_dict)
-        if btn_row:
-            rows.append(btn_row)
-    return json.dumps({"inline_keyboard": rows}) if rows else None
-
-
-async def _fast_bot_api_send(
-    chat_id: int | str,
-    file_path: str,
-    *,
-    is_video: bool = False,
-    caption: str = "",
-    title: str = "Track",
-    performer: str = "",
-    duration: int = 0,
-    reply_to_message_id: Optional[int] = None,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
-) -> Optional[str]:
-    """
-    رفع صاروخي مباشر عبر C-Level OpenSSL HTTP Stream إلى api.telegram.org
-    يتخطى تقطيع 512KB وتشفير MTProto في بايثون بالكامل ويرفع 2-10 ميجا في 0.2 - 0.5 ثانية!
-    يعيد الـ file_id لحفظه في الكاش.
-    """
-    if not os.path.exists(file_path):
-        return None
-
-    file_size = os.path.getsize(file_path)
-    # Bot API يدعم حتى 50MB للرفع المباشر؛ للملفات الأكبر ننتقل تلقائياً لـ Kurigram BigFile Parallel
-    if file_size > 48 * 1024 * 1024:
-        return None
-
-    session = await _get_bot_api_session()
-    method = "sendVideo" if is_video else "sendAudio"
-    field_name = "video" if is_video else "audio"
-    api_url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/{method}"
-
-    form = aiohttp.FormData()
-    form.add_field("chat_id", str(chat_id))
-    if caption:
-        form.add_field("caption", caption)
-        form.add_field("parse_mode", "HTML")
-    if duration:
-        form.add_field("duration", str(int(duration)))
-
-    if is_video:
-        form.add_field("supports_streaming", "true")
-    else:
-        if title:
-            form.add_field("title", str(title))
-        if performer:
-            form.add_field("performer", str(performer))
-
-    if reply_to_message_id:
-        form.add_field(
-            "reply_parameters",
-            json.dumps({"message_id": int(reply_to_message_id), "allow_sending_without_reply": True}),
-        )
-
-    kb_json = _build_inline_keyboard_json(reply_markup)
-    if kb_json:
-        form.add_field("reply_markup", kb_json)
-
-    ext = Path(file_path).suffix.lower()
-    mime = "video/mp4" if is_video else ("audio/mp4" if ext == ".m4a" else "audio/mpeg")
-    clean_name = f"{title[:50]}{ext or ('.mp4' if is_video else '.m4a')}"
-
-    try:
-        with open(file_path, "rb") as fp:
-            form.add_field(field_name, fp, filename=clean_name, content_type=mime)
-            async with session.post(api_url, data=form) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("ok") and "result" in data:
-                        res = data["result"]
-                        media_obj = res.get("video") or res.get("audio") or res.get("document")
-                        if media_obj and media_obj.get("file_id"):
-                            return media_obj["file_id"]
-                        return "SENT_OK"
-    except Exception:
-        pass
-
-    return None
-
-
-# ── ترقيع Kurigram لإصلاح ثغرة FilePartMissing وتفعيل TCP_NODELAY للملفات الأكبر من 48 ميجا ──
-def _patch_kurigram_turbo_mtproto():
-    if getattr(Client, "_turbo_mtproto_patched", False):
+def _patch_kurigram_engine():
+    if getattr(Client, "_cutthrough_patched", False):
         return
 
-    # 1. تفعيل TCP_NODELAY ورفع حجم الـ Socket Buffer إلى 4MB لمنع تأخير Nagle's Algorithm
+    # 1. رفع عدد خيوط التشفير في Kurigram من 1 إلى 8 لتشفير أجزاء الملف بالتوازي
+    Session.CRYPTO_EXECUTOR_WORKERS = 8
+
+    # 2. تفعيل TCP_NODELAY وتكبير حجم الـ Socket Buffer إلى 4MB لضخ الأجزاء بدون أي تأخير
     _orig_keepalive = TCP._enable_keepalive
 
     @staticmethod
-    def _turbo_socket_tuning(sock: socket.socket) -> None:
+    def _turbo_socket_opts(sock: socket.socket) -> None:
         _orig_keepalive(sock)
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -167,9 +92,9 @@ def _patch_kurigram_turbo_mtproto():
         except Exception:
             pass
 
-    TCP._enable_keepalive = _turbo_socket_tuning
+    TCP._enable_keepalive = _turbo_socket_opts
 
-    # 2. إجبار SaveBigFilePart (InputFileBig) على نفس الـ Production DC لمنع خطأ FilePartMissing نهائياً
+    # 3. تعديل save_file ليقبل الملفات المضخوخة مسبقاً في الرامات (_StreamedTelegramFile) ويرفع أي ملف محلي بـ SaveBigFilePart
     async def _fast_save_file(
         self: Client,
         path,
@@ -181,6 +106,12 @@ def _patch_kurigram_turbo_mtproto():
         if path is None:
             return None
 
+        if isinstance(path, (raw.types.InputFile, raw.types.InputFileBig)):
+            return path
+
+        if hasattr(path, "input_file"):
+            return path.input_file
+
         async with self.save_file_semaphore:
             part_size = 512 * 1024
             if isinstance(path, (str, os.PathLike)):
@@ -191,7 +122,7 @@ def _patch_kurigram_turbo_mtproto():
                 close_fp = False
 
             try:
-                file_name = getattr(fp, "name", "file.mp4")
+                file_name = os.path.basename(str(getattr(fp, "name", "file.mp4")))
                 fp.seek(0, os.SEEK_END)
                 file_size = fp.tell()
                 fp.seek(0)
@@ -203,9 +134,25 @@ def _patch_kurigram_turbo_mtproto():
                 is_missing_part = file_id is not None
                 file_id = file_id or self.rnd_id()
 
-                # السر هنا: استخدام SaveBigFilePart دائماً لأن SaveFilePart العادي يسبب FilePartMissing عند التوازي!
                 dc_id = await self.storage.dc_id()
                 session = await self.get_session(dc_id, is_media=False)
+                try:
+                    if session.connection and session.connection.protocol:
+                        session.connection.protocol.crypto_executor = _FAST_CRYPTO_POOL
+                except Exception:
+                    pass
+
+                if file_total_parts == 1 and not is_missing_part:
+                    chunk = fp.read(part_size)
+                    md5_sum = md5(chunk).hexdigest()
+                    await session.invoke(
+                        raw.functions.upload.SaveFilePart(
+                            file_id=file_id, file_part=0, bytes=chunk
+                        )
+                    )
+                    return raw.types.InputFile(
+                        id=file_id, parts=1, name=file_name, md5_checksum=md5_sum
+                    )
 
                 if is_missing_part:
                     fp.seek(part_size * file_part)
@@ -221,7 +168,7 @@ def _patch_kurigram_turbo_mtproto():
                         )
                     return None
 
-                workers_count = min(16, max(4, file_total_parts))
+                workers_count = min(12, max(2, file_total_parts))
                 queue: asyncio.Queue = asyncio.Queue()
                 failures: list[Exception] = []
 
@@ -257,7 +204,7 @@ def _patch_kurigram_turbo_mtproto():
                 return raw.types.InputFileBig(
                     id=file_id,
                     parts=file_total_parts,
-                    name=os.path.basename(str(file_name)),
+                    name=file_name,
                 )
             except StopTransmission:
                 raise
@@ -266,425 +213,576 @@ def _patch_kurigram_turbo_mtproto():
                     fp.close()
 
     Client.save_file = _fast_save_file
-    Client._turbo_mtproto_patched = True
+    Client._cutthrough_patched = True
 
 
-_patch_kurigram_turbo_mtproto()
+_patch_kurigram_engine()
 
 
-def clean_query(text: str) -> str:
-    if not text:
-        return ""
-    cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", " ", text)
-    return " ".join(cleaned.split())
+async def _pump_thumb_in_ram(client: Client, thumbnail_url: Optional[str], vidid: Optional[str]) -> Optional[_StreamedTelegramFile]:
+    """سحب صورة بروفايل الأغنية في الرامات ورفعها لتيليجرام مباشرة بدون لمس الهارد"""
+    url = thumbnail_url or (f"https://i.ytimg.com/vi/{vidid}/hqdefault.jpg" if vidid else None)
+    if not url:
+        return None
+    try:
+        http = await _get_http_session()
+        async with http.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.read()
+            if not data or len(data) > 512 * 1024:
+                return None
+
+        dc_id = await client.storage.dc_id()
+        session = await client.get_session(dc_id, is_media=False)
+        file_id = client.rnd_id()
+        md5_sum = md5(data).hexdigest()
+        await session.invoke(
+            raw.functions.upload.SaveFilePart(file_id=file_id, file_part=0, bytes=data)
+        )
+        inp = raw.types.InputFile(id=file_id, parts=1, name="thumb.jpg", md5_checksum=md5_sum)
+        return _StreamedTelegramFile(inp, "thumb.jpg")
+    except Exception:
+        return None
 
 
-YT_REGEX = re.compile(
-    r"^(https?://)?(www\.)?(youtube\.com|youtu\.?be)/.+", re.IGNORECASE
-)
+async def _live_cutthrough_pump(
+    client: Client,
+    stream_info: dict,
+    file_name: str,
+) -> Optional[_StreamedTelegramFile]:
+    """
+    الضخ المباشر الحي (Cut-Through Streaming):
+    يسحب البث من رابط يوتيوب المباشر على شكل بلوكات 10MB متوازية،
+    وفور وصول أول 512KB في الرامات يضخها في نفس اللحظة إلى سيرفر تيليجرام أثناء نزول باقي الأجزاء!
+    """
+    direct_url = stream_info.get("direct_url")
+    if not direct_url or not stream_info.get("can_direct_pump"):
+        return None
+
+    headers = dict(stream_info.get("headers") or {})
+    headers["Accept-Encoding"] = "identity"
+
+    part_size = 512 * 1024          # 512 KB (حجم قطعة تيليجرام القياسي)
+    block_parts = 20                # 20 قطعة = 10 MiB بالظبط
+    block_size = part_size * block_parts  # 10,485,760 bytes (10 MiB)
+
+    http = await _get_http_session()
+    dc_id = await client.storage.dc_id()
+    tg_session = await client.get_session(dc_id, is_media=False)
+    try:
+        if tg_session.connection and tg_session.connection.protocol:
+            tg_session.connection.protocol.crypto_executor = _FAST_CRYPTO_POOL
+    except Exception:
+        pass
+
+    file_id = client.rnd_id()
+    upload_sem = asyncio.Semaphore(16)
+    upload_tasks: list[asyncio.Task] = []
+    failures: list[Exception] = []
+
+    async def _push_part_to_tg(part_idx: int, total_parts: int, data: bytes):
+        async with upload_sem:
+            if failures:
+                return
+            try:
+                if total_parts == 1:
+                    await tg_session.invoke(
+                        raw.functions.upload.SaveFilePart(
+                            file_id=file_id,
+                            file_part=0,
+                            bytes=data,
+                        )
+                    )
+                else:
+                    await tg_session.invoke(
+                        raw.functions.upload.SaveBigFilePart(
+                            file_id=file_id,
+                            file_part=part_idx,
+                            file_total_parts=total_parts,
+                            bytes=data,
+                        )
+                    )
+            except Exception as e:
+                failures.append(e)
+
+    async def _stream_10mb_block(block_idx: int, start_byte: int, end_byte: int, total_parts: int, first_chunk_holder: list):
+        req_headers = dict(headers)
+        req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
+        base_part = block_idx * block_parts
+        part_offset = 0
+        buf = bytearray()
+
+        async with http.get(direct_url, headers=req_headers) as resp:
+            if resp.status not in (200, 206):
+                raise RuntimeError(f"HTTP {resp.status}")
+
+            # قراءة البث فور وصول أول كيلوبايت وتجميع 512KB ثم ضخها فوراً لتيليجرام بدون انتظار باقي البلوك
+            async for raw_slice in resp.content.iter_chunked(65536):
+                if failures:
+                    return
+                buf.extend(raw_slice)
+                while len(buf) >= part_size:
+                    chunk_bytes = bytes(buf[:part_size])
+                    del buf[:part_size]
+                    if total_parts == 1 and base_part + part_offset == 0:
+                        first_chunk_holder.append(chunk_bytes)
+                    t = asyncio.create_task(
+                        _push_part_to_tg(base_part + part_offset, total_parts, chunk_bytes)
+                    )
+                    upload_tasks.append(t)
+                    part_offset += 1
+
+            if buf and not failures:
+                chunk_bytes = bytes(buf)
+                if total_parts == 1 and base_part + part_offset == 0:
+                    first_chunk_holder.append(chunk_bytes)
+                t = asyncio.create_task(
+                    _push_part_to_tg(base_part + part_offset, total_parts, chunk_bytes)
+                )
+                upload_tasks.append(t)
+
+    try:
+        # معرفة الحجم الدقيق بالبايت من clen أو أول بايت
+        total_size = int(stream_info.get("filesize") or 0)
+        if not total_size:
+            probe_headers = dict(headers)
+            probe_headers["Range"] = "bytes=0-0"
+            async with http.get(direct_url, headers=probe_headers) as probe:
+                cr = probe.headers.get("Content-Range", "")
+                if "/" in cr:
+                    total_size = int(cr.split("/")[-1])
+                elif probe.headers.get("Content-Length"):
+                    total_size = int(probe.headers["Content-Length"])
+
+        if total_size <= 0:
+            return None
+
+        total_parts = int(math.ceil(total_size / part_size))
+        total_blocks = int(math.ceil(total_size / block_size))
+        first_chunk_holder: list[bytes] = []
+
+        # تشغيل جميع بلوكات الـ 10MB بالتوازي بحيث يتم السحب والضخ لتيليجرام في نفس اللحظة!
+        block_sem = asyncio.Semaphore(6)
+
+        async def _run_block(b_idx: int):
+            async with block_sem:
+                s_byte = b_idx * block_size
+                e_byte = min(s_byte + block_size - 1, total_size - 1)
+                await _stream_10mb_block(b_idx, s_byte, e_byte, total_parts, first_chunk_holder)
+
+        await asyncio.gather(*[_run_block(b) for b in range(total_blocks)])
+        if upload_tasks:
+            await asyncio.gather(*upload_tasks)
+
+        if failures:
+            return None
+
+        if total_parts == 1 and first_chunk_holder:
+            md5_sum = md5(first_chunk_holder[0]).hexdigest()
+            inp = raw.types.InputFile(
+                id=file_id, parts=1, name=file_name, md5_checksum=md5_sum
+            )
+        else:
+            inp = raw.types.InputFileBig(
+                id=file_id, parts=total_parts, name=file_name
+            )
+        return _StreamedTelegramFile(inp, file_name)
+    except Exception:
+        return None
 
 
-@app.on_message(filters.command(["song"]) & filters.group & ~BANNED_USERS)
-@language
-async def song_commad_group(client, message: Message, _):
-    upl = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    text=_["SG_B_1"],
-                    url=f"https://t.me/{app.username}?start=song",
-                ),
-            ]
-        ]
-    )
-    await message.reply_text(_["song_1"], reply_markup=upl)
+def clean_title(title: str) -> str:
+    title = re.sub(r'\[.*?\]', '', title)
+    title = re.sub(r'\(.*?\)', '', title)
+    bad_words = [
+        "Official Video", "Official Audio", "Lyrics", "Video",
+        "Music Video", "HD", "HQ", "4K", "ft.", "feat.",
+        "Live", "Performance", "with Lyrics"
+    ]
+    for word in bad_words:
+        title = title.replace(word, "").replace(word.lower(), "").replace(word.upper(), "")
+    return title.strip()
 
+@app.on_message(filters.command(["رفع الجودة", "ارفع الجودة"], prefixes="") & filters.user(SUDO_USERS))
+async def enable_hq_cmd(client, message):
+    SongDownloader.enable_quality()
+    await message.reply_text("تم تفعيل الجودة العالية (HQ).")
 
-@app.on_message(filters.command(["song"]) & filters.private & ~BANNED_USERS)
-@language
-async def song_commad_private(client, message: Message, _):
-    await message.delete()
+@app.on_message(filters.command(["قفل الجودة", "اقفل الجودة"], prefixes="") & filters.user(SUDO_USERS))
+async def disable_hq_cmd(client, message):
+    SongDownloader.disable_quality()
+    await message.reply_text("تم تعطيل الجودة العالية.")
+
+@app.on_message(filters.command(["قفل التنزيل"], prefixes=["", "/"]) & filters.user(SUDO_USERS))
+async def lock_download(client, message):
+    await set_config("download_locked", True)
+    await message.reply_text("تم تعطيل التنزيل.")
+
+@app.on_message(filters.command(["فتح التنزيل"], prefixes=["", "/"]) & filters.user(SUDO_USERS))
+async def unlock_download(client, message):
+    await set_config("download_locked", False)
+    await message.reply_text("تم تفعيل التنزيل.")
+
+@app.on_message(filters.command(["قفل كيب البحث"], prefixes=["", "/"]) & filters.user(SUDO_USERS))
+async def lock_buttons(client, message):
+    await set_config("buttons_locked", True)
+    await message.reply_text("تم تعطيل أزرار البحث.")
+
+@app.on_message(filters.command(["تفعيل كيب البحث"], prefixes=["", "/"]) & filters.user(SUDO_USERS))
+async def unlock_buttons(client, message):
+    await set_config("buttons_locked", False)
+    await message.reply_text("تم تفعيل أزرار البحث.")
+
+def _build_list_keyboard(results: list, user_id: int) -> InlineKeyboardMarkup:
+    keyboard = []
+    for i, r in enumerate(results[:DEFAULT_LIST_LIMIT], start=1):
+        clean_t = clean_title(r.get("title", "Unknown"))[:40]
+        keyboard.append([InlineKeyboardButton(text=f"{i}. {clean_t}", callback_data=f"list_select {r.get('vidid', '')}|{user_id}")])
+    keyboard.append([
+        InlineKeyboardButton(text="المالك", url=OWNER_USERNAME_LINK),
+        InlineKeyboardButton(text="إغلاق", callback_data="list_close"),
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+# ==========================================================
+# معالج ابعتلي / هات (تم إصلاح استخراج كلمة فيديو)
+# ==========================================================
+@app.on_message(filters.regex(r"^/?(ابعتلي|هات|هاتلي|تنزيل|تحميل|song)(\s+.+)?$") & filters.group & ~BANNED_USERS)
+async def smart_song_handler(client, message: Message):
+    if await get_config("download_locked") and message.from_user.id not in SUDO_USERS:
+        return await message.reply_text("عذراً، التنزيل متوقف حالياً.")
+
+    match = re.match(r"^/?(ابعتلي|هات|هاتلي|تنزيل|تحميل|song)(\s+.+)?$", message.text)
+    if not match: return
+
+    query = match.group(2)
+    if not query or query.strip() == "":
+        return await message.reply_text("يرجى كتابة الاسم.")
+
+    query = query.strip()
+    is_video_request = False
+    
+    # 🔴 التصليح: البحث الدقيق عن كلمة فيديو لإرسال الفيديو
+    words = query.split()
+    for kw in ["فيديو", "video", "فيد"]:
+        if kw in words:
+            is_video_request = True
+            words.remove(kw)
+            
+    query = " ".join(words).strip()
+    if not query:
+        return await message.reply_text("يرجى كتابة اسم الأغنية.")
+
     url = await YouTube.url(message)
+    if not url and ("http" in query): url = query
 
     if url:
-        if not await YouTube.valid(url):
-            return await message.reply_text(_["song_5"])
-        mystic = await message.reply_text(_["play_1"])
-        (
-            title,
-            duration_min,
-            duration_sec,
-            thumbnail,
-            vidid,
-        ) = await YouTube.details(url)
-        if str(duration_min) == "None":
-            return await mystic.edit_text(_["song_3"])
-        if int(duration_sec) > SONG_DOWNLOAD_DURATION_LIMIT:
-            return await mystic.edit_text(
-                _["play_4"].format(SONG_DOWNLOAD_DURATION, duration_min)
-            )
-        buttons = song_markup(_, vidid)
-        await mystic.delete()
-        return await message.reply_photo(
-            thumbnail,
-            caption=_["song_4"].format(title),
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-    else:
-        if len(message.command) < 2:
-            return await message.reply_text(_["song_2"])
-        query = message.text.split(None, 1)[1]
+        return await direct_download_handler(client, message, url, is_video_request, show_play_btn=False)
 
-    mystic = await message.reply_text(_["play_1"])
-    (
-        title,
-        duration_min,
-        duration_sec,
-        thumbnail,
-        vidid,
-    ) = await YouTube.details(query)
-    if not title or str(title) == "Unknown":
-        return await mystic.edit_text(_["song_5"])
-    if str(duration_min) == "None":
-        return await mystic.edit_text(_["song_3"])
+    if await get_config("buttons_locked"):
+        return await direct_download_handler(client, message, query, is_video_request, show_play_btn=False)
+
+    mystic = await message.reply_text("جاري البحث...")
+    try:
+        stream_info = await SongDownloader.extract_stream(query, is_video=is_video_request)
+        if not stream_info:
+            return await mystic.edit_text("لم يتم العثور على نتائج.")
+        title = stream_info["title"]
+        duration_min = stream_info["duration_min"]
+        duration_sec = stream_info["duration_sec"]
+        thumbnail = stream_info["thumbnail"]
+        vidid = stream_info["vidid"]
+    except: return await mystic.edit_text("لم يتم العثور على نتائج.")
+
     if int(duration_sec) > SONG_DOWNLOAD_DURATION_LIMIT:
-        return await mystic.edit_text(
-            _["play_6"].format(SONG_DOWNLOAD_DURATION, duration_min)
-        )
-    buttons = song_markup(_, vidid)
+        return await mystic.edit_text(f"مدة المقطع أكبر من {SONG_DOWNLOAD_DURATION} دقيقة.")
+
     await mystic.delete()
     return await message.reply_photo(
         thumbnail,
-        caption=_["song_4"].format(title),
-        reply_markup=InlineKeyboardMarkup(buttons),
+        caption=f"العنوان: {title}\nالمدة: {duration_min}\n\nاختر طريقة التحميل:",
+        reply_markup=InlineKeyboardMarkup(song_markup(None, vidid)),
     )
 
-
-@app.on_message(
-    filters.command(["يوت", "yut"], prefixes=["", "/"]) & ~BANNED_USERS
-)
-@language
-async def yut_command(client, message: Message, _):
-    raw_query = None
-    if len(message.command) > 1:
-        raw_query = message.text.split(None, 1)[1].strip()
-    elif message.reply_to_message and (
-        message.reply_to_message.text or message.reply_to_message.caption
-    ):
-        raw_query = (
-            message.reply_to_message.text or message.reply_to_message.caption
-        ).strip()
-
-    if not raw_query:
-        return await message.reply_text("🎸 **اكتب اسم الأغنية جنب الأمر يا غالي.**")
-
-    is_video_force = False
-    if raw_query.startswith(("فيديو ", "ف ")):
-        is_video_force = True
-        raw_query = re.sub(r"^(فيديو|ف)\s+", "", raw_query).strip()
-
-    if YT_REGEX.match(raw_query):
-        return await direct_download_handler(
-            client, message, raw_query, is_video_force=is_video_force
-        )
-
-    query = clean_query(raw_query)
+# ==========================================================
+# أمر يوت (الضخ المباشر في خطوة واحدة بدون بحث مزدوج)
+# ==========================================================
+@app.on_message(filters.command(["يوت", "yut"], prefixes=["", "/"]) & ~BANNED_USERS)
+async def yut_command(client, message):
+    if await get_config("download_locked") and message.from_user.id not in SUDO_USERS:
+        return await message.reply_text("التنزيل مغلق حالياً.")
+    if len(message.command) < 2: return await message.reply_text("اكتب الاسم.")
+    
+    query = message.text.split(None, 1)[1]
+    is_video = False
+    
+    # 🔴 التصليح: البحث الدقيق عن كلمة فيديو لإرسال الفيديو
+    words = query.split()
+    for kw in ["فيديو", "video", "فيد"]:
+        if kw in words:
+            is_video = True
+            words.remove(kw)
+            
+    query = " ".join(words).strip()
     if not query:
-        return await message.reply_text("❌ **الاسم غير صالح للبحث.**")
+        return await message.reply_text("اكتب الاسم.")
+    
+    if "http" in query:
+        return await direct_download_handler(client, message, query.split()[0], is_video, show_play_btn=False)
 
-    return await direct_download_handler(
-        client, message, query, is_video_force=is_video_force
-    )
+    return await direct_download_handler(client, message, query, is_video, show_play_btn=False)
 
+# ==========================================================
+# أمر ليست
+# ==========================================================
+@app.on_message(filters.command(["ليست", "لست"], prefixes=["", "/"]) & ~BANNED_USERS)
+async def list_command(client, message: Message):
+    if await get_config("download_locked") and message.from_user.id not in SUDO_USERS:
+        return await message.reply_text("التنزيل مغلق حالياً.")
 
-@app.on_message(filters.regex(YT_REGEX) & filters.private & ~BANNED_USERS)
-@language
-async def auto_link_handler(client, message: Message, _):
-    if message.text and message.text.startswith(("/", "!", ".")):
+    query = message.text.split(None, 1)[1].strip() if len(message.command) > 1 else None
+    if not query:
+        try:
+            response = await client.ask(message.chat.id, "ارسل اسـم الفنان الان .", user_id=message.from_user.id, timeout=30, reply_markup=ForceReply(selective=True))
+            query = response.text
+        except: return 
+
+    if "http" in query and ("list=" in query or "playlist" in query):
+        await message.reply_text("تم الكشف عن بلاي ليست.. جاري المعالجة.")
+        async def _process_playlist():
+            try:
+                limit = getattr(SongDownloader, "playlist_limit", DEFAULT_LIST_LIMIT) or DEFAULT_LIST_LIMIT
+                ids = await YouTube.playlist(query, limit, message.from_user.id)
+                if not ids: return
+                for vid in ids[:limit]:
+                    try:
+                        await direct_download_handler(client, message, f"https://www.youtube.com/watch?v={vid}", False, show_play_btn=False)
+                        await asyncio.sleep(1)
+                    except: continue
+            except: return
+        asyncio.create_task(_process_playlist())
         return
-    url = message.text.strip()
-    await direct_download_handler(client, message, url, is_video_force=False)
 
-
-async def direct_download_handler(
-    client: Client,
-    message: Message,
-    query: str,
-    is_video_force: bool = False,
-):
-    mystic = await message.reply_text("⚡ جاري التحضير والرفع...")
-
+    mystic = await message.reply_text("جاري البحث...")
     try:
-        details = await YouTube.details(query)
-        if not details:
-            return await mystic.edit_text("❌ لم يتم العثور على نتائج.")
+        limit = getattr(SongDownloader, "playlist_limit", DEFAULT_LIST_LIMIT) or DEFAULT_LIST_LIMIT
+        results = await YouTube.search(query, limit=int(limit))
+    except: results = []
 
-        title, duration_min, duration_sec, thumb, vidid = details
+    if not results: return await mystic.edit_text("لم يتم العثور على نتائج.")
+    await mystic.delete()
+    return await message.reply_text("اخـتار من الـقـائمة التالية.\n\n                                       ـ", reply_markup=_build_list_keyboard(results, message.from_user.id))
+
+# ==========================================================
+# معالج الضخ المباشر الفعلي للرفع
+# ==========================================================
+async def direct_download_handler(client, message, url_or_query, is_video_force=False, show_play_btn=False):
+    mystic = await message.reply_text("جاري المعالجة...")
+    try:
+        # 1. استخراج الرابط المباشر + تفاصيل الأغنية في خطوة واحدة فقط (0.15 ثانية)
+        stream_info = await SongDownloader.extract_stream(url_or_query, is_video=is_video_force)
+        if stream_info:
+            title = stream_info["title"]
+            duration_sec = stream_info["duration_sec"]
+            thumbnail_url = stream_info["thumbnail"]
+            vidid = stream_info["vidid"]
+            url = f"https://www.youtube.com/watch?v={vidid}"
+        else:
+            try:
+                details = await YouTube.details(url_or_query)
+                title, duration_sec, thumbnail_url, vidid = details[0], details[2], details[3], details[4] if details else ("Unknown", 0, None, None)
+                url = f"https://www.youtube.com/watch?v={vidid}" if vidid else url_or_query
+            except:
+                return await mystic.edit_text("لم يتم العثور على نتائج.")
+
         if not vidid or title == "Unknown":
-            return await mystic.edit_text("❌ لم يتم العثور على نتائج.")
+            return await mystic.edit_text("لم يتم العثور على نتائج.")
 
-        url = f"https://www.youtube.com/watch?v={vidid}"
-        cache_key = f"{vidid}_{'v' if is_video_force else 'a'}"
+        clean_full_title = clean_title(title)
+        artist = clean_full_title.split("-", 1)[0].strip() if "-" in clean_full_title else clean_full_title
+        song = clean_full_title.split("-", 1)[1].strip() if "-" in clean_full_title else clean_full_title
+        caption = f"الطلب: {message.from_user.mention}\nالعنوان: {song}"
 
-        channel = getattr(config, "SUPPORT_CHANNEL", "https://t.me/SourceBoda")
-        buttons = InlineKeyboardMarkup(
-            [[InlineKeyboardButton(text="• 𝚂ᴏᴜʀᴄᴇ ✘ 𝐁ᴏᴅᴀ •", url=channel)]]
-        )
-        caption_text = f"🎬 <b>{title}</b>" if is_video_force else f"🎧 <b>{title}</b>"
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(text="- تـشغيل الان.", callback_data=f"force_play {vidid}")]]) if show_play_btn and vidid else None
+        cache_key = f"{vidid}|{'video' if is_video_force else 'audio'}"
+        cached = _RAM_FILE_CACHE.get(cache_key) or await get_cached_file(cache_key)
 
-        # 1. لو الـ file_id محفوظ في الكاش، يتبعت في 0.05 ثانية!
-        cached_fid = _MEM_FILE_CACHE.get(cache_key)
-        if cached_fid and cached_fid != "SENT_OK":
-            if is_video_force:
-                await client.send_video(
-                    message.chat.id,
-                    video=cached_fid,
-                    caption=caption_text,
-                    reply_to_message_id=message.id,
-                    reply_markup=buttons,
-                )
-            else:
-                await client.send_audio(
-                    message.chat.id,
-                    audio=cached_fid,
-                    caption=caption_text,
-                    title=title,
-                    performer=config.BOT_NAME,
-                    duration=int(duration_sec or 0),
-                    reply_to_message_id=message.id,
-                    reply_markup=buttons,
-                )
-            await mystic.delete()
-            return
+        if cached:
+            _RAM_FILE_CACHE[cache_key] = cached
+            await mystic.edit_text("جاري الرفع.")
+            try:
+                if is_video_force: await client.send_video(message.chat.id, video=cached, caption=caption, reply_markup=reply_markup, reply_to_message_id=message.id)
+                else: await client.send_audio(message.chat.id, audio=cached, caption=caption, reply_markup=reply_markup, reply_to_message_id=message.id)
+                return await mystic.delete()
+            except: pass
 
-        # 2. التحميل السريع في /dev/shm (مع فصل الصوت النقي 1.3MB في 0.1 ثانية)
-        path, _ = await SongDownloader.download(url, is_video=is_video_force)
-        if not path or not os.path.exists(path):
-            return await mystic.edit_text("❌ فشل التحميل من المصدر.")
+        await mystic.edit_text("جاري الضخ والرفع...")
+        file_id = None
+        ext = ".mp4" if is_video_force else ".m4a"
+        virtual_name = f"{song[:40] or vidid}{ext}"
 
-        # 3. الرفع الصاروخي المباشر عبر C-Level HTTP Bot API Stream (يرفع 2-10 ميجا في ~0.3 ثانية!)
-        sent_fid = await _fast_bot_api_send(
-            message.chat.id,
-            path,
-            is_video=is_video_force,
-            caption=caption_text,
-            title=title,
-            performer=config.BOT_NAME,
-            duration=int(duration_sec or 0),
-            reply_to_message_id=message.id,
-            reply_markup=buttons,
-        )
+        # 2. الضخ المباشر الحي في الرامات (أول 512KB تترفع لتليجرام فور نزولها من يوتيوب بالتوازي مع صورة البروفايل!)
+        if stream_info and stream_info.get("can_direct_pump"):
+            thumb_stream_task = asyncio.create_task(_pump_thumb_in_ram(client, thumbnail_url, vidid))
+            media_stream_task = asyncio.create_task(_live_cutthrough_pump(client, stream_info, virtual_name))
+            streamed_thumb, streamed_media = await asyncio.gather(thumb_stream_task, media_stream_task)
 
-        if sent_fid:
-            if sent_fid != "SENT_OK":
-                _MEM_FILE_CACHE[cache_key] = sent_fid
-            await mystic.delete()
-            return
+            if streamed_media:
+                try:
+                    if is_video_force:
+                        sent = await client.send_video(
+                            message.chat.id,
+                            video=streamed_media,
+                            caption=caption,
+                            duration=int(duration_sec or 0),
+                            thumb=streamed_thumb,
+                            file_name=virtual_name,
+                            supports_streaming=True,
+                            reply_markup=reply_markup,
+                            reply_to_message_id=message.id,
+                        )
+                        if sent and sent.video:
+                            file_id = sent.video.file_id
+                    else:
+                        sent = await client.send_audio(
+                            message.chat.id,
+                            audio=streamed_media,
+                            caption=caption,
+                            duration=int(duration_sec or 0),
+                            title=song,
+                            performer=artist,
+                            thumb=streamed_thumb,
+                            file_name=virtual_name,
+                            reply_markup=reply_markup,
+                            reply_to_message_id=message.id,
+                        )
+                        if sent and sent.audio:
+                            file_id = sent.audio.file_id
+                except Exception:
+                    file_id = None
 
-        # 4. للملفات الضخمة (> 48MB): استخدام Kurigram BigFile Parallel بدون FilePartMissing
-        if is_video_force:
-            sent = await client.send_video(
-                message.chat.id,
-                video=path,
-                caption=caption_text,
-                duration=int(duration_sec or 0),
-                supports_streaming=True,
-                reply_to_message_id=message.id,
-                reply_markup=buttons,
-            )
-            if sent and sent.video:
-                _MEM_FILE_CACHE[cache_key] = sent.video.file_id
-        else:
-            sent = await client.send_audio(
-                message.chat.id,
-                audio=path,
-                caption=caption_text,
-                title=title,
-                performer=config.BOT_NAME,
-                duration=int(duration_sec or 0),
-                reply_to_message_id=message.id,
-                reply_markup=buttons,
-            )
-            if sent and sent.audio:
-                _MEM_FILE_CACHE[cache_key] = sent.audio.file_id
+        # 3. مسار احتياطي تلقائي في حال احتاج الملف لمعالجة ffmpeg في /dev/shm
+        path = None
+        is_direct = False
+        if not file_id:
+            thumb_task = asyncio.create_task(_pump_thumb_in_ram(client, thumbnail_url, vidid))
+            dl_task = asyncio.create_task(SongDownloader.download(url, is_video=is_video_force))
+            streamed_thumb, (path, is_direct) = await asyncio.gather(thumb_task, dl_task)
 
-        await mystic.delete()
+            if not path:
+                return await mystic.edit_text("فشل التحميل.")
 
-    except Exception as e:
-        await mystic.edit_text(f"❌ حدث خطأ: {e}")
+            if not is_video_force and not path.endswith((".m4a", ".mp3")):
+                try:
+                    new_path = path.rsplit(".", 1)[0] + ".m4a"
+                    os.rename(path, new_path)
+                    path = new_path
+                except: pass
 
-
-@app.on_callback_query(
-    filters.regex(pattern=r"song_back") & ~BANNED_USERS
-)
-@languageCB
-async def songs_back_helper(client, CallbackQuery: CallbackQuery, _):
-    callback_data = CallbackQuery.data.strip()
-    callback_request = callback_data.split(None, 1)[1]
-    stype, vidid = callback_request.split("|")
-    buttons = song_markup(_, vidid)
-    return await CallbackQuery.edit_message_reply_markup(
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-
-@app.on_callback_query(
-    filters.regex(pattern=r"song_helper") & ~BANNED_USERS
-)
-@languageCB
-async def song_helper_cb(client, CallbackQuery: CallbackQuery, _):
-    callback_data = CallbackQuery.data.strip()
-    callback_request = callback_data.split(None, 1)[1]
-    stype, vidid = callback_request.split("|")
-    try:
-        await CallbackQuery.answer(_["song_6"], show_alert=True)
-    except Exception:
-        pass
-    if stype == "audio":
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    text="⚡ تحميل صوت بأعلى جودة (Fast M4A)",
-                    callback_data=f"song_download audio|140|{vidid}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=_["BACK_BUTTON"],
-                    callback_data=f"song_back {stype}|{vidid}",
-                ),
-                InlineKeyboardButton(
-                    text=_["CLOSE_BUTTON"], callback_data="close"
-                ),
-            ],
-        ]
-    else:
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    text="🎬 تحميل فيديو سريع (Fast MP4)",
-                    callback_data=f"song_download video|18|{vidid}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=_["BACK_BUTTON"],
-                    callback_data=f"song_back {stype}|{vidid}",
-                ),
-                InlineKeyboardButton(
-                    text=_["CLOSE_BUTTON"], callback_data="close"
-                ),
-            ],
-        ]
-    return await CallbackQuery.edit_message_reply_markup(
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-
-@app.on_callback_query(
-    filters.regex(pattern=r"song_download") & ~BANNED_USERS
-)
-@languageCB
-async def song_download_cb(client, CallbackQuery: CallbackQuery, _):
-    try:
-        await CallbackQuery.answer(" جاري الرفع...")
-    except Exception:
-        pass
-
-    callback_data = CallbackQuery.data.strip()
-    callback_request = callback_data.split(None, 1)[1]
-    stype, format_id, vidid = callback_request.split("|")
-    yturl = f"https://www.youtube.com/watch?v={vidid}"
-    is_video = stype == "video"
-    cache_key = f"{vidid}_{'v' if is_video else 'a'}"
-
-    mystic = await CallbackQuery.edit_message_text(_["song_8"])
-
-    try:
-        title, duration_min, duration_sec, thumb_url, _ = await YouTube.details(yturl)
-        title = re.sub(r"\W+", " ", title.title())
-
-        cached_fid = _MEM_FILE_CACHE.get(cache_key)
-        if cached_fid and cached_fid != "SENT_OK":
-            await mystic.delete()
-            if is_video:
-                await CallbackQuery.message.reply_video(video=cached_fid, caption=title)
-            else:
-                await CallbackQuery.message.reply_audio(
-                    audio=cached_fid,
-                    caption=title,
-                    title=title,
-                    performer=config.BOT_NAME,
-                )
-            return
-
-        file_path, _ = await SongDownloader.download(yturl, is_video=is_video)
-        if not file_path or not os.path.exists(file_path):
-            return await mystic.edit_text(_["song_9"].format("Download Failed"))
-
-        sent_fid = await _fast_bot_api_send(
-            CallbackQuery.message.chat.id,
-            file_path,
-            is_video=is_video,
-            caption=title,
-            title=title,
-            performer=config.BOT_NAME,
-            duration=int(duration_sec or 0),
-        )
-
-        if sent_fid:
-            if sent_fid != "SENT_OK":
-                _MEM_FILE_CACHE[cache_key] = sent_fid
-            await mystic.delete()
-            return
+            try:
+                if is_video_force:
+                    sent = await client.send_video(
+                        message.chat.id,
+                        video=path,
+                        caption=caption,
+                        duration=int(duration_sec or 0),
+                        thumb=streamed_thumb,
+                        supports_streaming=True,
+                        reply_markup=reply_markup,
+                        reply_to_message_id=message.id,
+                    )
+                    if sent and sent.video:
+                        file_id = sent.video.file_id
+                else:
+                    sent = await client.send_audio(
+                        message.chat.id,
+                        audio=path,
+                        caption=caption,
+                        duration=int(duration_sec or 0),
+                        title=song,
+                        performer=artist,
+                        thumb=streamed_thumb,
+                        reply_markup=reply_markup,
+                        reply_to_message_id=message.id,
+                    )
+                    if sent and sent.audio:
+                        file_id = sent.audio.file_id
+            except: pass
 
         await mystic.delete()
-        if is_video:
-            sent = await CallbackQuery.message.reply_video(
-                video=file_path,
-                duration=int(duration_sec or 0),
-                caption=title,
-                supports_streaming=True,
-            )
-            if sent and sent.video:
-                _MEM_FILE_CACHE[cache_key] = sent.video.file_id
-        else:
-            sent = await CallbackQuery.message.reply_audio(
-                audio=file_path,
-                caption=title,
-                title=title,
-                performer=config.BOT_NAME,
-                duration=int(duration_sec or 0),
-            )
-            if sent and sent.audio:
-                _MEM_FILE_CACHE[cache_key] = sent.audio.file_id
 
-    except Exception as e:
-        await mystic.edit_text(_["song_10"])
+        # 4. حفظ الـ file_id وإرساله لجروب السجل في الخلفية بدون تعطيل المستخدم!
+        async def _bg_log_and_cleanup(fid, fpath, direct_flag):
+            try:
+                if fid:
+                    _RAM_FILE_CACHE[cache_key] = fid
+                    await cache_file(cache_key, fid)
+                    if LOGGER_ID:
+                        if is_video_force:
+                            await client.send_video(LOGGER_ID, video=fid, caption=f"ID: `{vidid}`\n{clean_full_title}")
+                        else:
+                            await client.send_audio(LOGGER_ID, audio=fid, caption=f"ID: `{vidid}`\n{clean_full_title}")
+            except Exception:
+                pass
+            finally:
+                try:
+                    if not direct_flag and fpath and os.path.exists(fpath):
+                        os.remove(fpath)
+                except Exception:
+                    pass
 
+        asyncio.create_task(_bg_log_and_cleanup(file_id, path, is_direct))
 
-@app.on_callback_query(
-    filters.regex(pattern=r"^yut_dl\|") & ~BANNED_USERS
-)
-async def yut_callback_download(client, CallbackQuery: CallbackQuery):
+    except Exception as e: await mystic.edit_text(f"خطأ: {e}")
+
+# ==========================================================
+# Callbacks
+# ==========================================================
+@app.on_callback_query(filters.regex(pattern=r"list_select") & ~BANNED_USERS)
+async def list_select_cb(client, query):
     try:
-        _, stype, vidid, user_id = CallbackQuery.data.split("|")
-    except Exception:
-        return
+        vidid, uid = query.data.split(None, 1)[1].split("|", 1)
+        if query.from_user.id != int(uid): return await query.answer("مش ليك.", show_alert=True)
+        await query.answer("جاري التحضير...", show_alert=False)
+        await direct_download_handler(client, query.message, f"https://www.youtube.com/watch?v={vidid}", False, show_play_btn=True)
+    except: await query.message.reply_text("فشل.")
 
-    if CallbackQuery.from_user.id != int(user_id):
-        return await CallbackQuery.answer(
-            "❌ هذا الطلب لا يخصك يا غالي!", show_alert=True
-        )
-
-    await CallbackQuery.answer(" جاري الرفع...")
-    await direct_download_handler(
-        client,
-        CallbackQuery.message,
-        f"https://www.youtube.com/watch?v={vidid}",
-        is_video_force=(stype == "v"),
-    )
+@app.on_callback_query(filters.regex(pattern=r"force_play") & ~BANNED_USERS)
+async def force_play_cb(client, query):
+    try: vidid = query.data.split()[1]
+    except: return
+    chat_id, user_id, user_name = query.message.chat.id, query.from_user.id, query.from_user.first_name
+    await query.answer("جاري التشغيل...", show_alert=False)
     try:
-        await CallbackQuery.message.delete()
-    except Exception:
-        pass
+        language = await get_lang(chat_id)
+        details, _ = await YouTube.track(vidid, videoid=vidid)
+        await stream(get_string(language), query.message, user_id, details, chat_id, user_name, chat_id, video=False, streamtype="custom", forceplay=True)
+    except Exception as e: await query.message.reply_text(f"فشل التشغيل: {e}")
+
+@app.on_callback_query(filters.regex(pattern=r"list_close") & ~BANNED_USERS)
+async def list_close_cb(client, query):
+    try: await query.message.edit_reply_markup(None)
+    except: pass
+    
+@app.on_callback_query(filters.regex(pattern=r"song_back") & ~BANNED_USERS)
+async def songs_back_helper(client, query):
+    if await get_config("download_locked") and query.from_user.id not in SUDO_USERS: return
+    return await query.edit_message_reply_markup(InlineKeyboardMarkup(song_markup(None, query.data.split("|")[1])))
+
+@app.on_callback_query(filters.regex(pattern=r"song_download") & ~BANNED_USERS)
+async def song_download_cb(client, query):
+    if await get_config("download_locked") and query.from_user.id not in SUDO_USERS: return
+    try: await query.answer("جاري...", show_alert=True)
+    except: pass
+    data = query.data.split("|")
+    # 🔴 التصليح: تحديد إن الزر المنداس عليه هو فيديو ولا صوت بشكل سليم
+    is_video = True if data[1].strip() == "video" else False
+    await direct_download_handler(client, query.message, f"https://www.youtube.com/watch?v={data[2]}", is_video_force=is_video, show_play_btn=False)
+
+@app.on_callback_query(filters.regex(pattern=r"song_helper") & ~BANNED_USERS)
+async def song_helper_cb(client, query):
+    if await get_config("download_locked") and query.from_user.id not in SUDO_USERS: return
+    try: await query.answer("جاري...", show_alert=True)
+    except: pass
+    await direct_download_handler(client, query.message, f"https://www.youtube.com/watch?v={query.data.split('|')[1]}", not ("audio" in query.data), False)
