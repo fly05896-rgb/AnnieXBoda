@@ -1,22 +1,16 @@
-# Authored By Certified Coders © 2026
-# Ultra-Fast YouTube Downloader (Zero-JS visionOS + Shared RAM Player Cache + 20ms RAM Audio Remux)
-
 import asyncio
-import logging
 import os
+import logging
+import subprocess
 import shutil
-import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Tuple
-
+import urllib.parse
 import yt_dlp
+from concurrent.futures import ThreadPoolExecutor
 
-import config
-from AnnieXMedia.utils.tuning import CHUNK_SIZE, CPU, SEM, YTDLP_TIMEOUT
+logging.basicConfig(level=logging.ERROR)
+def LOGGER(name): return logging.getLogger(name)
 
-log = logging.getLogger("AnnieXMedia.SongDownloader")
-
-# ── تفعيل الكاش الدائم لمفسر الجافاسكريبت والـ Player داخل yt-dlp ──
+# ── تفعيل الكاش الدائم في الرامات لـ yt-dlp ──
 _SHARED_CODE_CACHE: dict = {}
 _SHARED_PLAYER_CACHE: dict = {}
 
@@ -40,255 +34,259 @@ except Exception:
     pass
 
 
+class Config:
+    if os.path.exists("/dev/shm"):
+        DOWNLOAD_PATH = "/dev/shm/AnnieSongDownloads"
+    else:
+        DOWNLOAD_PATH = os.path.abspath("downloads_songs")
+
+    CACHE_DIR = "/dev/shm/ytdlp_cache" if os.path.exists("/dev/shm") else os.path.abspath("ytdlp_cache")
+    MAX_WORKERS = 16
+
+
+os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
+os.makedirs(Config.CACHE_DIR, exist_ok=True)
+
+
 class SongDownloaderAPI:
     def __init__(self):
-        self.download_dir = getattr(config, "DOWNLOAD_PATH", "/dev/shm/AnnieDownloads")
-        if not os.path.exists(self.download_dir):
-            try:
-                os.makedirs(self.download_dir, exist_ok=True)
-            except Exception:
-                self.download_dir = "downloads"
-                os.makedirs(self.download_dir, exist_ok=True)
-
-        self.cache_dir = "/dev/shm/ytdlp_cache"
-        os.makedirs(self.cache_dir, exist_ok=True)
-
-        self.executor = ThreadPoolExecutor(max_workers=CPU)
-        self.has_aria2 = shutil.which("aria2c") is not None
+        self.pool = ThreadPoolExecutor(max_workers=Config.MAX_WORKERS)
+        self.force_high_quality = False
+        self.playlist_limit = 10
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
-        self._file_cache: dict[str, str] = {}
+        self._stream_cache: dict[str, dict] = {}
 
-        if self.has_aria2:
-            log.info("🚀 [SongDownloader] Aria2c Turbo Engine Ready.")
+    def set_limit(self, limit: int):
+        self.playlist_limit = int(limit)
 
-    def _get_cookie_file(self) -> Optional[str]:
-        paths = ["cookies/cookies.txt", "AnnieXMedia/assets/cookies.txt", "cookies.txt"]
-        for p in paths:
+    def open_limit(self):
+        self.playlist_limit = 0
+
+    def reset_limit(self):
+        self.playlist_limit = 10
+
+    def enable_quality(self):
+        self.force_high_quality = True
+
+    def disable_quality(self):
+        self.force_high_quality = False
+
+    def _get_cookie_file(self):
+        for p in ["cookies/cookies.txt", "AnnieXMedia/assets/cookies.txt", "cookies.txt"]:
             if os.path.exists(p) and os.path.getsize(p) > 0:
                 return p
         return None
 
-    def _extract_vid_id(self, url: str) -> str:
-        if "v=" in url:
-            return url.split("v=")[1].split("&")[0]
-        if "youtu.be/" in url:
-            return url.split("youtu.be/")[1].split("?")[0]
-        if "shorts/" in url:
-            return url.split("shorts/")[1].split("?")[0]
-        return str(abs(hash(url)))
+    def _build_ydl_opts(self, is_video: bool, is_playlist: bool = False, out_tmpl: str | None = None) -> dict:
+        if is_video:
+            if self.force_high_quality:
+                target_clients = ["visionos", "android", "tv_samsung"]
+                fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+            else:
+                target_clients = ["visionos", "android"]
+                fmt = "18/b[ext=mp4][height<=480]/b[ext=mp4][height<=360]/b[ext=mp4]/best"
+        else:
+            target_clients = ["android", "visionos"]
+            fmt = "140/139/ba[ext=m4a]/ba/18/b"
 
-    def _find_cached_file(self, vid_id: str, is_video: bool) -> Optional[str]:
-        cache_key = f"{vid_id}_{'v' if is_video else 'a'}"
-        cached = self._file_cache.get(cache_key)
-        if cached and os.path.exists(cached) and os.path.getsize(cached) > 0:
-            return cached
-
-        prefix = f"{vid_id}_v." if is_video else f"{vid_id}_a."
-        try:
-            for fname in os.listdir(self.download_dir):
-                if fname.startswith(prefix) and not fname.endswith((".part", ".ytdl", ".aria2")):
-                    full_path = os.path.join(self.download_dir, fname)
-                    if os.path.getsize(full_path) > 0:
-                        self._file_cache[cache_key] = full_path
-                        return full_path
-        except Exception:
-            pass
-        return None
-
-    async def _strip_video_to_m4a(self, input_path: str, vid_id: str) -> str:
-        """
-        فصل مسار الصوت النقي (AAC m4a) من حاوية MP4 في الرامات بدون إعادة ترميز (-vn -acodec copy)
-        بيحول ملف 12 ميجا إلى ~1.4 ميجا في 0.05 - 0.15 ثانية فقط!
-        """
-        if not self.has_ffmpeg or not os.path.exists(input_path):
-            return input_path
-
-        out_m4a = os.path.join(self.download_dir, f"{vid_id}_a.m4a")
-        if os.path.abspath(input_path) == os.path.abspath(out_m4a):
-            temp_in = os.path.join(self.download_dir, f"{vid_id}_raw.mp4")
-            try:
-                os.replace(input_path, temp_in)
-                input_path = temp_in
-            except Exception:
-                return input_path
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-i",
-                input_path,
-                "-vn",
-                "-acodec",
-                "copy",
-                out_m4a,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=15)
-            if os.path.exists(out_m4a) and os.path.getsize(out_m4a) > 10240:
-                try:
-                    os.remove(input_path)
-                except Exception:
-                    pass
-                return out_m4a
-        except Exception as e:
-            log.warning(f"Audio stream copy skipped: {e}")
-
-        return input_path
-
-    def _fast_ytdlp_download(self, url: str, vid_id: str, is_video: bool) -> Tuple[Optional[str], int]:
-        cookie_file = self._get_cookie_file()
-        suffix = "v" if is_video else "a"
-        outtmpl = f"{self.download_dir}/{vid_id}_{suffix}.%(ext)s"
-
-        # visionos في المقدمة دائماً لأنه لا يحتاج base.js ولا deno ولا PO Token (استخراج في 0.15 ثانية)
-        target_clients = ["visionos", "tv_samsung", "android", "web_embedded"]
-
-        # للصوت: نفضل m4a/webm الصغير إن وجد، وإلا نأخذ itag 18 الفوري من visionos ونفصل منه الصوت في 0.1 ثانية
-        fmt = (
-            "18/best[ext=mp4][height<=720]/best[ext=mp4]/best"
-            if is_video
-            else "140/139/251/250/249/bestaudio[ext=m4a]/bestaudio/18/best"
-        )
-
-        ydl_opts = {
+        opts = {
             "format": fmt,
-            "outtmpl": outtmpl,
             "quiet": True,
             "no_warnings": True,
             "nocheckcertificate": True,
-            "geo_bypass": True,
-            "noplaylist": True,
-            "overwrites": True,
-            "cachedir": self.cache_dir,
-            "cookiefile": cookie_file,
-            "socket_timeout": 10,
-            "retries": 2,
-            "fragment_retries": 2,
-            "concurrent_fragment_downloads": 16,
-            "http_chunk_size": CHUNK_SIZE,
-            "buffersize": 1024 * 1024,
-            "js_runtimes": {"deno": {}, "node": {}},
+            "cookiefile": self._get_cookie_file(),
+            "cachedir": Config.CACHE_DIR,
+            "force_ipv4": True,
+            "source_address": "0.0.0.0",
+            "geo_bypass": False,
+            "js_runtimes": {"node": {}, "deno": {}},
             "remote_components": ["ejs:github"],
             "extractor_args": {
                 "youtube": {
                     "player_client": target_clients,
+                    "player_skip": ["webpage", "configs", "initial_data", "js"],
+                    "skip": ["hls", "dash", "translated_subs"],
+                    "formats": ["missing_pot"],
+                    "fetch_pot": ["never"],
                 }
             },
+            "concurrent_fragment_downloads": 16,
+            "http_chunk_size": 10485760,
+            "buffersize": 1024 * 1024 * 5,
+            "retries": 5,
+            "socket_timeout": 10,
+            "noplaylist": not is_playlist,
+            "ignoreerrors": True,
         }
+        if out_tmpl:
+            opts["outtmpl"] = out_tmpl
+        if is_playlist and self.playlist_limit > 0:
+            opts["playlistend"] = self.playlist_limit
+        if is_video and self.force_high_quality:
+            opts["merge_output_format"] = "mp4"
+        return opts
 
-        if self.has_aria2:
-            ydl_opts["external_downloader"] = "aria2c"
-            ydl_opts["external_downloader_args"] = [
-                "--max-connection-per-server=16",
-                "--split=16",
-                "--min-split-size=512K",
-                "--disk-cache=64M",
-                "--file-allocation=none",
-                "--summary-interval=0",
-                "--console-log-level=error",
-                "--quiet=true",
-            ]
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if not info:
-                    return None, 0
-                if "entries" in info and info["entries"]:
-                    info = info["entries"][0]
-
-                vcodec = info.get("vcodec") or "none"
-                has_video_stream = vcodec != "none"
-
-                filepath = ydl.prepare_filename(info)
-                if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                    return filepath, (1 if has_video_stream else 0)
-
-                found = self._find_cached_file(vid_id, is_video)
-                return found, (1 if has_video_stream else 0)
-        except Exception as e:
-            log.warning(f"Primary download error ({e}), retrying native HTTP...")
-            ydl_opts.pop("external_downloader", None)
-            ydl_opts.pop("external_downloader_args", None)
+    async def extract_stream(self, query_or_link: str, is_video: bool = False) -> dict | None:
+        """
+        استخراج الرابط المباشر + كافة بيانات الأغنية (العنوان، المدة، الصورة، الحجم بالبايت)
+        في خطوة واحدة فقط (0.15 ثانية) بدون تحميل الملف للهارد، ليتم ضخه فوراً إلى تيليجرام!
+        """
+        link = query_or_link.strip()
+        if "googleusercontent.com" in link and "v=" in link:
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if not info:
-                        return None, 0
-                    if "entries" in info and info["entries"]:
-                        info = info["entries"][0]
-                    vcodec = info.get("vcodec") or "none"
-                    has_video_stream = vcodec != "none"
-                    filepath = ydl.prepare_filename(info)
-                    if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                        return filepath, (1 if has_video_stream else 0)
-            except Exception as e2:
-                log.error(f"Fallback download failed: {e2}")
+                link = f"https://www.youtube.com/watch?v={link.split('v=')[1].split('&')[0]}"
+            except Exception:
+                pass
 
-        return None, 0
+        if not link.startswith(("http", "www", "ytsearch")):
+            link = f"ytsearch1:{link}"
 
-    async def download(self, url: str, is_video: bool = False) -> Tuple[Optional[str], bool]:
-        vid_id = self._extract_vid_id(url)
-        cache_key = f"{vid_id}_{'v' if is_video else 'a'}"
-
-        cached = self._find_cached_file(vid_id, is_video)
-        if cached:
-            return cached, False
+        cache_key = f"{link}|{'v' if is_video else 'a'}"
+        cached_info = self._stream_cache.get(cache_key)
+        if cached_info:
+            return cached_info
 
         loop = asyncio.get_running_loop()
 
-        async with SEM:
+        def _extract_only():
+            ydl_opts = self._build_ydl_opts(is_video=is_video, is_playlist=False)
             try:
-                file_path, has_video_stream = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self.executor,
-                        self._fast_ytdlp_download,
-                        url,
-                        vid_id,
-                        is_video,
-                    ),
-                    timeout=YTDLP_TIMEOUT,
-                )
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(link, download=False)
+                    if not info:
+                        return None
+                    if "entries" in info:
+                        entries = [e for e in info["entries"] if e]
+                        if not entries:
+                            return None
+                        info = entries[0]
 
-                if file_path and os.path.exists(file_path):
-                    if not is_video:
-                        if has_video_stream or file_path.endswith(".mp4") or os.path.getsize(file_path) > 4 * 1024 * 1024:
-                            file_path = await self._strip_video_to_m4a(file_path, vid_id)
-                        elif not file_path.endswith((".m4a", ".mp3", ".ogg", ".opus")):
-                            base = os.path.splitext(file_path)[0]
-                            new_path = f"{base}.m4a"
-                            try:
-                                os.replace(file_path, new_path)
-                                file_path = new_path
-                            except Exception:
-                                pass
+                    direct_url = info.get("url")
+                    if not direct_url and info.get("requested_formats"):
+                        direct_url = info["requested_formats"][0].get("url")
 
-                    self._file_cache[cache_key] = file_path
-                    return file_path, False
+                    vidid = info.get("id") or ""
+                    title = info.get("title") or "Unknown"
+                    duration_sec = int(info.get("duration") or 0)
+                    mins, secs = divmod(duration_sec, 60)
+                    hours, mins = divmod(mins, 60)
+                    duration_min = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
 
-            except asyncio.TimeoutError:
-                log.error(f"Timeout downloading: {url}")
+                    thumb = info.get("thumbnail") or (f"https://i.ytimg.com/vi/{vidid}/hqdefault.jpg" if vidid else "")
+                    if "?" in thumb:
+                        thumb = thumb.split("?")[0]
+
+                    filesize = int(info.get("filesize") or info.get("filesize_approx") or 0)
+                    if direct_url and not filesize:
+                        try:
+                            qs = urllib.parse.parse_qs(urllib.parse.urlparse(direct_url).query)
+                            if "clen" in qs:
+                                filesize = int(qs["clen"][0])
+                        except Exception:
+                            pass
+
+                    vcodec = info.get("vcodec") or "none"
+                    ext = info.get("ext") or ("mp4" if is_video else "m4a")
+                    headers = info.get("http_headers") or {}
+
+                    res = {
+                        "vidid": vidid,
+                        "title": title,
+                        "duration_sec": duration_sec,
+                        "duration_min": duration_min,
+                        "thumbnail": thumb,
+                        "direct_url": direct_url,
+                        "filesize": filesize,
+                        "vcodec": vcodec,
+                        "ext": ext,
+                        "headers": headers,
+                        "can_direct_pump": bool(
+                            direct_url
+                            and "m3u8" not in direct_url
+                            and (is_video or vcodec == "none" or ext in ("m4a", "mp3", "webm", "ogg", "opus"))
+                        ),
+                    }
+                    return res
             except Exception as e:
-                log.error(f"Unexpected error in SongDownloader: {e}")
+                LOGGER("SongDownloader").error(f"Stream Extract Error: {e}")
+                return None
 
-        return None, False
-
-    async def cleanup_old_files(self, max_age_seconds: int = 1800):
         try:
-            now = time.time()
-            for fname in os.listdir(self.download_dir):
-                fpath = os.path.join(self.download_dir, fname)
-                if os.path.isfile(fpath) and (now - os.path.getmtime(fpath)) > max_age_seconds:
-                    try:
-                        os.remove(fpath)
-                    except Exception:
-                        pass
+            data = await loop.run_in_executor(self.pool, _extract_only)
+            if data and data.get("vidid"):
+                self._stream_cache[cache_key] = data
+                self._stream_cache[f"https://www.youtube.com/watch?v={data['vidid']}|{'v' if is_video else 'a'}"] = data
+                return data
         except Exception:
             pass
+        return None
+
+    async def download(self, link: str, is_video: bool = False):
+        if "googleusercontent.com" in link and "v=" in link:
+            try:
+                link = f"https://www.youtube.com/watch?v={link.split('v=')[1].split('&')[0]}"
+            except Exception:
+                pass
+
+        if not link.startswith(("http", "www", "ytsearch")):
+            link = f"ytsearch1:{link}"
+
+        loop = asyncio.get_running_loop()
+        is_playlist = "list=" in link and "watch?v=" not in link
+
+        def _download_native():
+            suffix = "v" if is_video else "a"
+            out_tmpl = os.path.join(Config.DOWNLOAD_PATH, f"%(id)s_{suffix}.%(ext)s")
+            ydl_opts = self._build_ydl_opts(is_video=is_video, is_playlist=is_playlist, out_tmpl=out_tmpl)
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(link, download=True)
+                    if not info:
+                        return None
+
+                    if "entries" in info:
+                        entries = [e for e in info["entries"] if e]
+                        if not entries:
+                            return None
+                        info = entries[0]
+
+                    filepath = ydl.prepare_filename(info)
+
+                    if not is_video and filepath and os.path.exists(filepath):
+                        vcodec = info.get("vcodec") or "none"
+                        if vcodec != "none" or filepath.endswith(".mp4"):
+                            if self.has_ffmpeg:
+                                out_m4a = filepath.rsplit(".", 1)[0] + ".m4a"
+                                if os.path.abspath(filepath) == os.path.abspath(out_m4a):
+                                    tmp_in = filepath + ".raw.mp4"
+                                    os.replace(filepath, tmp_in)
+                                    filepath = tmp_in
+                                subprocess.run(
+                                    ["ffmpeg", "-y", "-loglevel", "error", "-i", filepath, "-vn", "-acodec", "copy", out_m4a],
+                                    check=False,
+                                    timeout=15,
+                                )
+                                if os.path.exists(out_m4a) and os.path.getsize(out_m4a) > 10240:
+                                    try:
+                                        os.remove(filepath)
+                                    except Exception:
+                                        pass
+                                    return out_m4a
+
+                    return filepath
+            except Exception as e:
+                LOGGER("SongDownloader").error(f"Download Error: {e}")
+            return None
+
+        try:
+            file_path = await loop.run_in_executor(self.pool, _download_native)
+            if file_path and os.path.exists(file_path):
+                return file_path, False
+        except Exception:
+            pass
+
+        return None, False
 
 
 SongDownloader = SongDownloaderAPI()
