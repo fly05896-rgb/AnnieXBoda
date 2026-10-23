@@ -1,5 +1,5 @@
 # Authored By Certified Coders © 2026
-# System: Stream Controller (Logic & Parallel Queue Bridge)
+# System: Stream Controller (Real NTgCalls Playback Check & Parallel Queue Bridge)
 
 import asyncio
 import contextlib
@@ -14,7 +14,6 @@ from AnnieXMedia.core.call import StreamController
 from AnnieXMedia.misc import db
 from AnnieXMedia.utils.database import (
     add_active_video_chat,
-    is_active_chat,
     remove_active_video_chat,
 )
 from AnnieXMedia.utils.errors import capture_internal_err
@@ -76,7 +75,8 @@ async def stream(
             title = result.get("title", "").title()
             duration_min = result.get("duration_min", "00:00")
 
-            is_active = await is_active_chat(chat_id)
+            # 🔥 فحص حقيقي من داخل محرك NTgCalls لمنع دخول الأغنية في طابور وهمي إذا انتهت الأغنية السابقة
+            is_active = await StreamController.is_truly_playing(chat_id)
 
             if is_active and not forceplay:
                 await put_queue(
@@ -164,7 +164,7 @@ async def stream(
             msg = f"{_['play_19']}\n\n"
             count = 0
 
-            is_active = await is_active_chat(chat_id)
+            is_active = await StreamController.is_truly_playing(chat_id)
             if not is_active and not forceplay:
                 db[chat_id] = []
 
@@ -181,7 +181,6 @@ async def stream(
                     except Exception:
                         return None
 
-            # 🚀 إذا لم يكن هناك بث نشط، نشغل أول أغنية صالحة فوراً بينما تُجلب باقي القائمة بالتوازي!
             remaining_items = items
             if not is_active:
                 first_idx = -1
@@ -243,7 +242,6 @@ async def stream(
                 else:
                     return
 
-            # 🚀 جلب تفاصيل باقي الأغاني في القائمة بالتوازي (Parallel Batch) بدلاً من الانتظار المتتالي
             if remaining_items:
                 fetched_list = await asyncio.gather(*[_fetch_item_details(it) for it in remaining_items])
                 for det in fetched_list:
@@ -316,7 +314,8 @@ async def stream(
                 case _:
                     q_path = file_path
 
-            is_active = await is_active_chat(chat_id)
+            # 🔥 فحص البث الحقيقي داخل NTgCalls قبل إضافة الأغنية لطابور الانتظار!
+            is_active = await StreamController.is_truly_playing(chat_id)
 
             # --- ACTION 1: ADD TO QUEUE ---
             if is_active and not forceplay:
