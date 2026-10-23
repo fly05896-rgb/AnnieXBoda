@@ -1,4 +1,4 @@
-===== Core Async / HTTP / JSON (Speedups) =====
+#===== Core Async / HTTP / JSON (Speedups) =====
 ​aiofiles
 aiohttp[speedups]
 httpx[http2,brotli]
@@ -9,13 +9,13 @@ cachetools
 brotli
 certifi
 flet
-​===== Crypto / Security =====
+​#===== Crypto / Security =====
 ​argon2-cffi
 pycryptodome
 pytgcrypto
-​===== Scheduling =====
+#​===== Scheduling =====
 ​apscheduler
-​===== Media / Audio / Video =====
+#​===== Media / Audio / Video =====
 ​yt-dlp==2026.10.21
 pydub
 mutagen
@@ -26,25 +26,25 @@ opencv-python-headless
 numpy
 pillow
 wget
-​===== Arabic Text Support =====
+#​===== Arabic Text Support =====
 ​arabic-reshaper
 python-bidi
-​===== Telegram / Calls (PyTgCalls 3.0.0 + NTgCalls 3.0.5 + Kurigram 2.2.26) =====
+​#===== Telegram / Calls (PyTgCalls 3.0.0 + NTgCalls 3.0.5 + Kurigram 2.2.26) =====
 ​ntgcalls>=3.0.5,<4.0.0
 py-tgcalls==3.0.0
 kurigram~=2.2.26
 pyromod
-​===== Web / API / Servers =====
+#​===== Web / API / Servers =====
 ​fastapi
 flask
 uvicorn
 python-multipart
 python-dotenv
 requests
-​===== Databases =====
+#​===== Databases =====
 ​motor
 pymongo
-​===== Search / AI / TTS =====
+​#===== Search / AI / TTS =====
 ​edge-tts
 gtts
 googletrans
@@ -55,7 +55,7 @@ spotipy
 lexica-api
 nekosbest
 g4f
-​===== Scraping / Parsing =====
+#​===== Scraping / Parsing =====
 ​beautifulsoup4
 bs4
 python-whois
@@ -64,7 +64,7 @@ unidecode
 rapidfuzz
 fuzzywuzzy
 python-Levenshtein
-​===== Utilities =====
+#​===== Utilities =====
 ​pyfiglet
 pyshorteners
 qrcode
@@ -73,12 +73,12 @@ speedtest-cli
 future
 gitpython
 heroku3
-​===== Images =====
+#​===== Images =====
 ​bing_image_downloader
-​===== Time / Locale =====
+#​===== Time / Locale =====
 ​pytz
 py-yt-search
 git+https://www.google.com/search?q=https://github.com/q058961234-web/youtube-search-python.git
-​===== AI Moderation =====
+#​===== AI Moderation =====
 ​nudenet
 onnxruntime
