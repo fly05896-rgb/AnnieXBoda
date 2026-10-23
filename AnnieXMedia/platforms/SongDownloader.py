@@ -1,18 +1,24 @@
+# Authored By Certified Coders © 2026
+# System: SongDownloader Engine (Integrated with Innertube Fast Stream + yt-dlp 2026.10.21)
+
 import asyncio
-import os
 import logging
-import subprocess
+import os
 import shutil
+import subprocess
 import urllib.parse
-import yt_dlp
 from concurrent.futures import ThreadPoolExecutor
 
-logging.basicConfig(level=logging.ERROR)
-def LOGGER(name): return logging.getLogger(name)
+import yt_dlp
 
-# ── تفعيل الكاش الدائم في الرامات لـ yt-dlp ──
-_SHARED_CODE_CACHE: dict = {}
-_SHARED_PLAYER_CACHE: dict = {}
+from AnnieXMedia.platforms.Youtube import YouTube, _SHARED_CODE_CACHE, _SHARED_PLAYER_CACHE
+
+logging.basicConfig(level=logging.ERROR)
+
+
+def LOGGER(name):
+    return logging.getLogger(name)
+
 
 try:
     from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
@@ -22,14 +28,16 @@ except Exception:
 
 try:
     from yt_dlp.extractor.youtube._video import YoutubeIE
-    _orig_yt_init = YoutubeIE.__init__
+    if not getattr(YoutubeIE, "_annie_cache_patched", False):
+        _orig_yt_init = YoutubeIE.__init__
 
-    def _fast_yt_init(self, *args, **kwargs):
-        _orig_yt_init(self, *args, **kwargs)
-        self._code_cache = _SHARED_CODE_CACHE
-        self._player_cache = _SHARED_PLAYER_CACHE
+        def _fast_yt_init(self, *args, **kwargs):
+            _orig_yt_init(self, *args, **kwargs)
+            self._code_cache = _SHARED_CODE_CACHE
+            self._player_cache = _SHARED_PLAYER_CACHE
 
-    YoutubeIE.__init__ = _fast_yt_init
+        YoutubeIE.__init__ = _fast_yt_init
+        YoutubeIE._annie_cache_patched = True
 except Exception:
     pass
 
@@ -72,18 +80,17 @@ class SongDownloaderAPI:
         self.force_high_quality = False
 
     def _build_ydl_opts(self, is_video: bool, is_playlist: bool = False, out_tmpl: str | None = None) -> dict:
+        # 🚀 متوافق مع yt-dlp 2026.10.21:
+        # استبدال android (المعطل والذي يطلب PO Token) بـ visionos و tv_samsung و tv_downgraded
+        target_clients = ["visionos", "tv_samsung", "tv_downgraded"]
         if is_video:
             if self.force_high_quality:
-                target_clients = ["visionos", "android"]
                 fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
             else:
-                target_clients = ["visionos", "android"]
-                fmt = "18/b[ext=mp4][height<=480]/b[ext=mp4][height<=360]/b[ext=mp4]/best"
+                fmt = "18/22/b[ext=mp4][height<=480]/b[ext=mp4][height<=720]/b[ext=mp4]/best"
         else:
-            target_clients = ["android", "visionos"]
-            fmt = "140/139/ba[ext=m4a]/ba/18/b"
+            fmt = "140/139/251/ba[ext=m4a]/ba/18/b"
 
-        # هام جداً: cookiefile يجب أن يكون None لأن android و visionos لا يدعمان الكوكيز في yt-dlp 2026.08.19
         opts = {
             "format": fmt,
             "quiet": True,
@@ -108,8 +115,8 @@ class SongDownloaderAPI:
             "concurrent_fragment_downloads": 16,
             "http_chunk_size": 10485760,
             "buffersize": 1024 * 1024 * 5,
-            "retries": 5,
-            "socket_timeout": 10,
+            "retries": 3,
+            "socket_timeout": 8,
             "noplaylist": not is_playlist,
             "ignoreerrors": True,
         }
@@ -124,7 +131,9 @@ class SongDownloaderAPI:
     async def extract_stream(self, query_or_link: str, is_video: bool = False) -> dict | None:
         """
         استخراج الرابط المباشر + كافة بيانات الأغنية (العنوان، المدة، الصورة، الحجم بالبايت)
-        في خطوة واحدة فقط (0.15 ثانية) بدون تحميل الملف للهارد، ليتم ضخه فوراً إلى تيليجرام!
+        في خطوة واحدة مدمجة:
+        1) أولاً عبر محرك Innertube المباشر (orjson + aiohttp IPv4) في ~80ms بدون تشغيل yt-dlp!
+        2) وإذا لم تتوفر الصيغة المباشرة، ينتقل تلقائياً لـ yt-dlp 2026.10.21 (visionos + tv_samsung).
         """
         link = query_or_link.strip()
         if "googleusercontent.com" in link and "v=" in link:
@@ -133,13 +142,23 @@ class SongDownloaderAPI:
             except Exception:
                 pass
 
-        if not link.startswith(("http", "www", "ytsearch")):
-            link = f"ytsearch1:{link}"
-
         cache_key = f"{link}|{'v' if is_video else 'a'}"
         cached_info = self._stream_cache.get(cache_key)
         if cached_info:
             return cached_info
+
+        # 🚀 المسار السريع المدمج (80ms) عبر Innertube المباشر بدون yt-dlp
+        if not (is_video and self.force_high_quality):
+            fast_data = await YouTube.extract_fast_stream_info(link, is_video=is_video)
+            if fast_data and fast_data.get("direct_url"):
+                self._stream_cache[cache_key] = fast_data
+                self._stream_cache[
+                    f"https://www.youtube.com/watch?v={fast_data['vidid']}|{'v' if is_video else 'a'}"
+                ] = fast_data
+                return fast_data
+
+        if not link.startswith(("http", "www", "ytsearch")):
+            link = f"ytsearch1:{link}"
 
         loop = asyncio.get_running_loop()
 
@@ -182,9 +201,9 @@ class SongDownloaderAPI:
 
                     vcodec = info.get("vcodec") or "none"
                     ext = info.get("ext") or ("mp4" if is_video else "m4a")
-                    headers = info.get("http_headers") or {}
+                    headers = info.get("http_headers") or YouTube.get_stream_headers(direct_url or "")
 
-                    res = {
+                    return {
                         "vidid": vidid,
                         "title": title,
                         "duration_sec": duration_sec,
@@ -201,7 +220,6 @@ class SongDownloaderAPI:
                             and (is_video or vcodec == "none" or ext in ("m4a", "mp3", "webm", "ogg", "opus"))
                         ),
                     }
-                    return res
             except Exception as e:
                 LOGGER("SongDownloader").error(f"Stream Extract Error: {e}")
                 return None
@@ -210,7 +228,9 @@ class SongDownloaderAPI:
             data = await loop.run_in_executor(self.pool, _extract_only)
             if data and data.get("vidid"):
                 self._stream_cache[cache_key] = data
-                self._stream_cache[f"https://www.youtube.com/watch?v={data['vidid']}|{'v' if is_video else 'a'}"] = data
+                self._stream_cache[
+                    f"https://www.youtube.com/watch?v={data['vidid']}|{'v' if is_video else 'a'}"
+                ] = data
                 return data
         except Exception:
             pass
@@ -258,7 +278,18 @@ class SongDownloaderAPI:
                                     os.replace(filepath, tmp_in)
                                     filepath = tmp_in
                                 subprocess.run(
-                                    ["ffmpeg", "-y", "-loglevel", "error", "-i", filepath, "-vn", "-acodec", "copy", out_m4a],
+                                    [
+                                        "ffmpeg",
+                                        "-y",
+                                        "-loglevel",
+                                        "error",
+                                        "-i",
+                                        filepath,
+                                        "-vn",
+                                        "-acodec",
+                                        "copy",
+                                        out_m4a,
+                                    ],
                                     check=False,
                                     timeout=15,
                                 )
