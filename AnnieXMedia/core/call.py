@@ -1,5 +1,5 @@
 # Authored By Certified Coders © 2026
-# System: PyTgCalls V3.0 & NTgCalls V3.0 Core Call Controller
+# System: PyTgCalls V3.0.0 & NTgCalls V3.0.5 Core Call Controller (Parallel Queue & Headers Optimized)
 
 import asyncio
 import logging
@@ -69,14 +69,15 @@ counter = {}
 
 def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> MediaStream:
     """
-    بناء مجرى البيانات متوافق 100% مع PyTgCalls 3.0.0 و NTgCalls 3.0.0:
-    - بدون -fflags nobuffer لمنع التقطيع (Stuttering) أثناء البث من يوتيوب
-    - بدون تكرار -reconnect لأن pytgcalls/ffmpeg.py يضيفها تلقائياً لـ ffmpeg
-    - تحديد AudioQuality.HIGH (48kHz) و VideoQuality.HD_720p (30fps) لمنع إجهاد المعالج
+    بناء مجرى البيانات متوافق 100% مع PyTgCalls 3.0.0 و NTgCalls 3.0.5:
+    - تمرير User-Agent Headers تلقائياً لروابط يوتيوب المباشرة لمنع HTTP 403 أثناء البث أو الفحص بـ ffprobe
+    - عدم تمرير -to إلى start params لتجنب تشغيل cleanup_commands (ffprobe -h full) في كل عملية Seek
+    - تحديد AudioQuality.HIGH (48kHz) و VideoQuality.HD_720p (30fps)
     """
     path = str(path)
     base_flags = "-probesize 512k -analyzeduration 1000000 "
     final_ffmpeg = (base_flags + ffmpeg_opts).strip()
+    headers = YouTube.get_stream_headers(path) if path.startswith("http") and "googlevideo.com" in path else None
 
     return MediaStream(
         media_path=path,
@@ -84,6 +85,7 @@ def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> Medi
         video_parameters=VideoQuality.HD_720p,
         audio_flags=MediaStream.Flags.REQUIRED,
         video_flags=MediaStream.Flags.REQUIRED if video else MediaStream.Flags.IGNORE,
+        headers=headers,
         ffmpeg_parameters=final_ffmpeg if final_ffmpeg else None,
     )
 
@@ -199,7 +201,6 @@ class Call:
             await _clear_(chat_id)
             self.active_calls.discard(chat_id)
 
-            # هام جداً: close=False حتى لا يقوم المساعد بقفل المكالمة الصوتية للجروب!
             with suppress(Exception):
                 await assistant.leave_call(chat_id, close=False)
 
@@ -215,7 +216,8 @@ class Call:
     async def seek_stream(self, chat_id: int, file_path: str, to_seek: str | int, duration: str | int, mode: str) -> None:
         async with self.get_lock(chat_id):
             assistant = await group_assistant(self, chat_id)
-            ffmpeg_opts = f"-ss {to_seek} -to {duration} "
+            # استخدام -ss فقط في البداية لتسريع القفز الفوري وتفادي رفض ffprobe للمعامل -to
+            ffmpeg_opts = f"-ss {to_seek} "
             is_video = mode == "video"
             stream = _build_stream(file_path, video=is_video, ffmpeg_opts=ffmpeg_opts)
             await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
@@ -242,16 +244,22 @@ class Call:
 
             if not os.path.exists(out_file):
                 setpts = round(1.0 / spd, 4)
+                input_args = []
+                if str(target_input).startswith("http") and "googlevideo.com" in str(target_input):
+                    ua = YouTube.get_stream_headers(str(target_input)).get("User-Agent", "")
+                    if ua:
+                        input_args = ["-user_agent", ua]
+
                 if is_video:
                     cmd = [
-                        "ffmpeg", "-y", "-i", str(target_input),
+                        "ffmpeg", "-y", *input_args, "-i", str(target_input),
                         "-filter:v", f"setpts={setpts}*PTS",
                         "-filter:a", f"atempo={spd}",
                         "-preset", "ultrafast", out_file,
                     ]
                 else:
                     cmd = [
-                        "ffmpeg", "-y", "-i", str(target_input),
+                        "ffmpeg", "-y", *input_args, "-i", str(target_input),
                         "-vn", "-filter:a", f"atempo={spd}",
                         out_file,
                     ]
@@ -317,7 +325,6 @@ class Call:
 
                 stream = _build_stream(link, video=video)
 
-                # تسجيل الشات كنشط قبل بدء play حتى لا يوقفه watcher.py عند فتح الكول تلقائياً
                 self.active_calls.add(chat_id)
                 await add_active_chat(chat_id)
 
@@ -360,7 +367,6 @@ class Call:
                         if users == 1:
                             autoend[chat_id] = datetime.now() + timedelta(minutes=1)
             finally:
-                # إبقاء الحماية لمدة ثانيتين بعد فتح الكول لتجاهل إشعار video_chat_started
                 async def _release_join_flag(cid: int):
                     await asyncio.sleep(2.5)
                     self._joining_chats.discard(cid)
@@ -368,7 +374,7 @@ class Call:
                 asyncio.create_task(_release_join_flag(chat_id))
 
     async def start(self) -> None:
-        LOGGER(__name__).info("Starting PyTgCalls Clients (NTgCalls v3.0.0)...")
+        LOGGER(__name__).info("Starting PyTgCalls Clients (PyTgCalls v3.0.0 & NTgCalls v3.0.5)...")
         if self.userbot1:
             self.one = PyTgCalls(self.userbot1)
         if self.userbot2:
@@ -395,7 +401,6 @@ class Call:
         assistants = list(filter(None, [self.one, self.two, self.three, self.four, self.five]))
 
         for assistant in assistants:
-            # الاستماع لانتهاء الصوت فقط لمنع تكرار الحدث مرتين في الفيديوهات
             @assistant.on_update(filters.stream_end(StreamEnded.Type.AUDIO))
             async def stream_end_handler(client: PyTgCalls, update: Update):
                 if isinstance(update, StreamEnded):
@@ -424,7 +429,6 @@ class Call:
                 if not self.is_joining(update.chat_id):
                     await self.stop_stream(update.chat_id)
 
-            # هام جداً: إضافة & filters.me حتى لا يتوقف البث عند طرد عضو عادي آخر في الكول
             @assistant.on_update(
                 filters.call_participant(
                     GroupCallParticipant.Action.KICKED | GroupCallParticipant.Action.LEFT
@@ -462,7 +466,7 @@ class Call:
                     with suppress(Exception):
                         await client.leave_call(chat_id, close=False)
 
-                    if config.AUTO_END:
+                    if getattr(config, "AUTO_END", False):
                         with suppress(Exception):
                             await app.send_message(chat_id, "✅ Queue finished. Stream ended automatically.")
                     return
@@ -484,14 +488,27 @@ class Call:
             is_video = str(streamtype) == "video"
             check[0]["played"] = 0
 
-            final_link = queued
+            # 🚀 تشغيل توليد الصورة المصغرة وجلب الرابط المباشر بالتوازي (Parallel Execution)
+            thumb_task = asyncio.create_task(get_thumb(videoid)) if videoid else None
 
-            if videoid and (
-                str(queued).startswith("vid_")
-                or str(queued).startswith("live_")
-                or str(queued).startswith("http")
-                or str(streamtype) in ("youtube", "live")
-            ):
+            # استباق جلب الرابط المباشر للأغنية التالية في الطابور (إن وجدت)
+            if len(check) > 1 and check[1].get("vidid"):
+                next_vid = check[1].get("vidid")
+                if len(str(next_vid)) == 11:
+                    asyncio.create_task(YouTube._innertube_player(str(next_vid)))
+
+            final_link = queued
+            needs_yt_resolve = bool(
+                videoid
+                and (
+                    str(queued).startswith("vid_")
+                    or str(queued).startswith("live_")
+                    or str(queued).startswith("http")
+                    or str(streamtype) in ("youtube", "live")
+                )
+            )
+
+            if needs_yt_resolve:
                 try:
                     direct = await YouTube.get_direct_link(
                         f"https://www.youtube.com/watch?v={videoid}",
@@ -503,19 +520,37 @@ class Call:
                         raise RuntimeError("Direct link extraction returned None")
                 except Exception as e:
                     LOGGER(__name__).error(f"Queue URL Fetch Error: {e}")
+                    if thumb_task:
+                        thumb_task.cancel()
                     return await self.play(client, chat_id)
 
             stream = _build_stream(final_link, video=is_video)
 
             try:
-                await client.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
+                try:
+                    await client.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
+                except Exception:
+                    # في حال انتهاء صلاحية الرابط في الكاش، نمسح الكاش ونجلب رابطاً جديداً فوراً
+                    if needs_yt_resolve and videoid:
+                        YouTube.invalidate_cache(videoid)
+                        fresh_link = await YouTube.get_direct_link(
+                            f"https://www.youtube.com/watch?v={videoid}",
+                            prefer_audio=not is_video,
+                        )
+                        if fresh_link:
+                            stream = _build_stream(fresh_link, video=is_video)
+                            await client.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
+                        else:
+                            raise
+                    else:
+                        raise
 
                 if is_video:
                     await add_active_video_chat(chat_id)
                 else:
                     await remove_active_video_chat(chat_id)
 
-                img = await get_thumb(videoid)
+                img = await thumb_task if thumb_task else config.YOUTUBE_IMG_URL
                 from AnnieXMedia.utils.inline import stream_markup
 
                 lang_code = await get_lang(chat_id)
@@ -545,6 +580,8 @@ class Call:
                     db[chat_id][0]["markup"] = "stream"
 
             except Exception as e:
+                if thumb_task and not thumb_task.done():
+                    thumb_task.cancel()
                 traceback.print_exc()
                 LOGGER(__name__).error(f"Queue Play Error: {e}")
                 await _clear_(chat_id)
