@@ -1,11 +1,10 @@
 # Authored By Certified Coders © 2026
-# System: Skip Handler (Optimized for PyTgCalls v3.0 & Zero-Crash Logic)
-# Optimized for Python 3.13: Pattern Matching & Suppress
+# System: Skip Handler (Parallel Stream & Thumbnail Resolution for PyTgCalls v3.0)
 
+import asyncio
 from contextlib import suppress
 from pyrogram import filters
-# تمت إضافة LinkPreviewOptions للإصدارات الحديثة
-from pyrogram.types import InlineKeyboardMarkup, Message, LinkPreviewOptions
+from pyrogram.types import InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 import config
 from AnnieXMedia import YouTube, app
@@ -20,28 +19,21 @@ from config import BANNED_USERS
 
 
 @app.on_message(
-    filters.command(["skip", "cskip", "next", "cnext", "تخطي", "التالي"], prefixes=["", "/", "!", "."]) 
-    & filters.group 
+    filters.command(["skip", "cskip", "next", "cnext", "تخطي", "التالي"], prefixes=["", "/", "!", "."])
+    & filters.group
     & ~BANNED_USERS
 )
 @AdminRightsCheck
 async def skip(cli, message: Message, _, chat_id: int):
-    # -----------------------
-    # Early Check: If no active call, return 'call_8'
-    # -----------------------
-    # 🚀 بايثون 3.13: استخدام suppress للتخطي الصامت للأخطاء بدلاً من try/except
     with suppress(Exception):
         if chat_id not in StreamController.active_calls:
             return await message.reply_text(_["call_8"])
 
-    # -------------------------------------------------------
-    # 1. Multi-Skip Logic (e.g., /skip 3)
-    # -------------------------------------------------------
     if len(message.command) > 1:
         loop = await get_loop(chat_id)
         if loop != 0:
             return await message.reply_text(_["admin_8"])
-        
+
         state = message.text.split(None, 1)[1].strip()
         if state.isnumeric():
             state = int(state)
@@ -75,10 +67,7 @@ async def skip(cli, message: Message, _, chat_id: int):
                 return await message.reply_text(_["queue_2"])
         else:
             return await message.reply_text(_["admin_9"])
-    
-    # -------------------------------------------------------
-    # 2. Standard Skip (Next Track)
-    # -------------------------------------------------------
+
     else:
         check = db.get(chat_id)
         popped = None
@@ -101,18 +90,17 @@ async def skip(cli, message: Message, _, chat_id: int):
                     reply_markup=close_markup(_),
                 )
                 return await StreamController.stop_stream(chat_id)
-    
+
     if not check:
         return
-    
-    # Prepare Next Track Data
+
     queued = check[0]["file"]
     title = (check[0]["title"]).title()
     user = check[0]["by"]
     streamtype = check[0]["streamtype"]
     videoid = check[0]["vidid"]
     status = True if str(streamtype) == "video" else False
-    
+
     db[chat_id][0]["played"] = 0
     exis = (check[0]).get("old_dur")
     if exis:
@@ -120,12 +108,8 @@ async def skip(cli, message: Message, _, chat_id: int):
         db[chat_id][0]["seconds"] = check[0]["old_second"]
         db[chat_id][0]["speed_path"] = None
         db[chat_id][0]["speed"] = 1.0
-        
-    # -------------------------------------------------------
-    # 3. Stream Switching Logic (🚀 Python 3.13 Match-Case)
-    # -------------------------------------------------------
+
     match queued:
-        # [A] Live Stream
         case _ if "live_" in queued:
             n, link = await YouTube.video(videoid, True)
             if n == 0 or not link:
@@ -134,7 +118,7 @@ async def skip(cli, message: Message, _, chat_id: int):
                 await StreamController.skip_stream(chat_id, link, video=status)
             except Exception:
                 return await message.reply_text(_["call_6"])
-            
+
             button = stream_markup(_, chat_id)
             img = await get_thumb(videoid)
             run = await message.reply_photo(
@@ -147,39 +131,32 @@ async def skip(cli, message: Message, _, chat_id: int):
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-            
-        # [B] YouTube Video / Audio Downloaded
+
         case _ if "vid_" in queued:
-            # تم التحديث لحل الكراش باستخدام LinkPreviewOptions بدلاً من disable_web_page_preview
             mystic = await message.reply_text(
-                _["call_7"], 
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
+                _["call_7"],
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             try:
-                # 🔥 بناء الرابط كامل لمنع الكراش
                 full_url = f"https://www.youtube.com/watch?v={videoid}"
-                
-                # استلام المسار فقط
-                file_path = await YouTube.download(
-                    link=full_url,
-                    mystic=mystic,
-                    video=status,
+                file_path, img = await asyncio.gather(
+                    YouTube.download(link=full_url, mystic=mystic, video=status),
+                    get_thumb(videoid),
                 )
             except Exception as e:
                 print(f"Skip Command Download Error: {e}")
                 return await mystic.edit_text(_["call_6"])
-            
+
             if not file_path:
                 return await mystic.edit_text(_["call_6"])
-                
+
             try:
                 await StreamController.skip_stream(chat_id, file_path, video=status)
             except Exception as e:
                 print(f"Skip Command Stream Error: {e}")
                 return await mystic.edit_text(_["call_6"])
-            
+
             button = stream_markup(_, chat_id)
-            img = await get_thumb(videoid)
             run = await message.reply_photo(
                 photo=img,
                 caption=_["stream_1"].format(
@@ -192,14 +169,13 @@ async def skip(cli, message: Message, _, chat_id: int):
             db[chat_id][0]["markup"] = "stream"
             with suppress(Exception):
                 await mystic.delete()
-                
-        # [C] Index Link / M3U8
+
         case _ if "index_" in queued:
             try:
                 await StreamController.skip_stream(chat_id, videoid, video=status)
             except Exception:
                 return await message.reply_text(_["call_6"])
-            
+
             button = stream_markup(_, chat_id)
             run = await message.reply_photo(
                 photo=config.STREAM_IMG_URL,
@@ -208,14 +184,13 @@ async def skip(cli, message: Message, _, chat_id: int):
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-            
-        # [D] Telegram Audio / SoundCloud / Direct Link
+
         case _:
             try:
                 await StreamController.skip_stream(chat_id, queued, video=status)
             except Exception:
                 return await message.reply_text(_["call_6"])
-            
+
             button = stream_markup(_, chat_id)
             if videoid == "telegram":
                 run = await message.reply_photo(
@@ -225,16 +200,16 @@ async def skip(cli, message: Message, _, chat_id: int):
                 )
                 db[chat_id][0]["mystic"] = run
                 db[chat_id][0]["markup"] = "tg"
-                
+
             elif videoid == "soundcloud":
                 run = await message.reply_photo(
-                    photo=config.SOUNDCLOUD_IMG_URL if str(streamtype) == "audio" else config.TELEGRAM_VIDEO_URL,
+                    photo=config.SOUNCLOUD_IMG_URL if str(streamtype) == "audio" else config.TELEGRAM_VIDEO_URL,
                     caption=_["stream_1"].format(config.SUPPORT_CHAT, title[:23], check[0]["dur"], user),
                     reply_markup=InlineKeyboardMarkup(button),
                 )
                 db[chat_id][0]["mystic"] = run
                 db[chat_id][0]["markup"] = "tg"
-                
+
             else:
                 img = await get_thumb(videoid)
                 run = await message.reply_photo(
