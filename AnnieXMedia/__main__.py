@@ -1,51 +1,53 @@
-import sys
-import os
-import asyncio
-import logging
+# Authored By Certified Coders © 2026
+# System: Main Entry Point (100% Cookie-Free Mode)
 
-# 🛠️ إضافة المطور: تشتغل فقط عند الطلب من الكونسول
+import asyncio
+import importlib
+import logging
+import os
+import sys
+from pathlib import Path
+
 if os.environ.get("DEBUG_NTG") == "1":
     logging.basicConfig(
         format="[%(levelname) 4s/%(asctime)s] %(name)s: %(message)s",
     )
-    logging.getLogger('ntgcalls').setLevel(logging.DEBUG)
+    logging.getLogger("ntgcalls").setLevel(logging.DEBUG)
     print("🚨 تم تفعيل وضع الـ DEBUG لمكتبة ntgcalls بناءً على طلبك من الكونسول 🚨")
 
-# 🚀 الطريقة الصحيحة لمنع تعارض الـ Event Loop مع MongoDB و Pyromod
 try:
     loop = asyncio.get_event_loop()
 except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-import importlib
 from pyrogram import idle
-from pytgcalls.exceptions import NoActiveGroupCall
 
 sys.path.insert(0, os.getcwd())
 
 import config
+from config import BANNED_USERS
 from AnnieXMedia import LOGGER, app, userbot
 from AnnieXMedia.core.call import StreamController
 from AnnieXMedia.misc import sudo
 from AnnieXMedia.plugins import ALL_MODULES
 from AnnieXMedia.utils.database import get_banned_users, get_gbanned
-from AnnieXMedia.utils.cookie_handler import fetch_and_store_cookies
-from config import BANNED_USERS
 
 
 async def init():
-    LOGGER("AnnieXMedia").info("🚀 Starting Annie Music Bot with Synchronized Event Loop...")
+    LOGGER("AnnieXMedia").info("🚀 Starting Annie Music Bot (100% Cookie-Free Mode)...")
 
     if not any([config.STRING1, config.STRING2, config.STRING3, config.STRING4, config.STRING5]):
         LOGGER(__name__).error("❌ Assistant session not filled, please fill a Pyrogram session...")
         sys.exit()
 
+    # مسح أي ملف كوكيز قديم من السيرفر لضمان عدم استخدامه نهائياً
     try:
-        await fetch_and_store_cookies()
-        LOGGER("AnnieXMedia").info("✅ YouTube Cookies Loaded Successfully.")
-    except Exception as e:
-        LOGGER("AnnieXMedia").warning(f"⚠️ Cookie Error: {e}")
+        legacy_cookie = Path("AnnieXMedia/assets/cookies.txt")
+        if legacy_cookie.exists():
+            legacy_cookie.unlink()
+    except Exception:
+        pass
 
     await sudo()
     try:
@@ -67,10 +69,10 @@ async def init():
     await StreamController.start()
 
     await StreamController.decorators()
-    LOGGER("AnnieXMedia").info("✅ Annie Music Bot Started Successfully.")
-    
+    LOGGER("AnnieXMedia").info("✅ Annie Music Bot Started Successfully (Zero-Cookies Engine).")
+
     await idle()
-    
+
     await app.stop()
     await userbot.stop()
     LOGGER("AnnieXMedia").info("🛑 Stopping Annie Music Bot...")
