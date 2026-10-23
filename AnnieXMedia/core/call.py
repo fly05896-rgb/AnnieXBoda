@@ -1,5 +1,6 @@
 # Authored By Certified Coders © 2026
-# System: PyTgCalls V3.0.0 & NTgCalls V3.0.5 Core Call Controller (Parallel Queue & Headers Optimized)
+# System: PyTgCalls V3.0.0 & NTgCalls V3.0.5 Core Call Controller
+# Fixes: FFmpeg EOF Hang Patch + Real NTgCalls Playback State Verification (Zero Ghost Queue)
 
 import asyncio
 import logging
@@ -9,6 +10,7 @@ from asyncio import Lock
 from contextlib import suppress
 from datetime import datetime, timedelta
 
+import pytgcalls.ffmpeg as _pytg_ffmpeg
 from pyrogram import enums, errors
 from pyrogram.errors import ChatAdminRequired
 from pyrogram.types import InlineKeyboardMarkup, InputMediaPhoto
@@ -20,6 +22,7 @@ from pytgcalls.exceptions import (
 )
 from pytgcalls.types import (
     AudioQuality,
+    Call as TgCallData,
     ChatUpdate,
     GroupCallConfig,
     GroupCallParticipant,
@@ -39,6 +42,7 @@ from AnnieXMedia.utils.database import (
     get_lang,
     get_loop,
     group_assistant,
+    is_active_chat,
     is_autoend,
     music_on,
     remove_active_chat,
@@ -49,6 +53,38 @@ from AnnieXMedia.utils.errors import capture_internal_err
 from AnnieXMedia.utils.exceptions import AssistantErr
 from AnnieXMedia.utils.stream.autoclear import auto_clean
 from AnnieXMedia.utils.thumbnails import get_thumb
+
+
+# ==========================================================
+# 🔥 إصلاح جذري لمشكلة تعليق نهاية الأغنية في PyTgCalls 3.0.0:
+# مكتبة pytgcalls تضيف تلقائياً (-reconnect_at_eof 1) لروابط HTTP مما يمنع FFmpeg
+# من الإغلاق عند انتهاء الأغنية، فلا ينطلق حدث StreamEnded وتدخل الأغاني التالية في الانتظار!
+# هذا الباتش يزيل (-reconnect_at_eof 1) ليغلق FFmpeg فور انتهاء آخر ثانية في الأغنية.
+# ==========================================================
+if not getattr(_pytg_ffmpeg, "_annie_eof_patched", False):
+    _orig_build_cmd = _pytg_ffmpeg.build_command
+
+    def _patched_build_command(*args, **kwargs) -> list[str]:
+        cmd = _orig_build_cmd(*args, **kwargs)
+        cleaned: list[str] = []
+        skip_next = False
+        for token in cmd:
+            if skip_next:
+                skip_next = False
+                continue
+            if token == "-reconnect_at_eof":
+                skip_next = True
+                continue
+            cleaned.append(token)
+        return cleaned
+
+    _pytg_ffmpeg.build_command = _patched_build_command
+    try:
+        import pytgcalls.types.stream.media_stream as _ms_mod
+        _ms_mod.build_command = _patched_build_command
+    except Exception:
+        pass
+    _pytg_ffmpeg._annie_eof_patched = True
 
 
 class PyTgCallsErrorFilter(logging.Filter):
@@ -70,8 +106,7 @@ counter = {}
 def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> MediaStream:
     """
     بناء مجرى البيانات متوافق 100% مع PyTgCalls 3.0.0 و NTgCalls 3.0.5:
-    - تمرير User-Agent Headers تلقائياً لروابط يوتيوب المباشرة لمنع HTTP 403 أثناء البث أو الفحص بـ ffprobe
-    - عدم تمرير -to إلى start params لتجنب تشغيل cleanup_commands (ffprobe -h full) في كل عملية Seek
+    - تمرير User-Agent Headers تلقائياً لروابط يوتيوب المباشرة لمنع HTTP 403
     - تحديد AudioQuality.HIGH (48kHz) و VideoQuality.HD_720p (30fps)
     """
     path = str(path)
@@ -128,6 +163,67 @@ class Call:
 
     def is_joining(self, chat_id: int) -> bool:
         return chat_id in self._joining_chats
+
+    async def is_truly_playing(self, chat_id: int) -> bool:
+        """
+        🔥 الفحص الحقيقي لمنع دخول الأغاني في طابور الانتظار الوهمي بعد انتهاء الأغنية:
+        يتحقق من:
+        1. وجود الشات في active_chats ووجود عناصر فعلية في db[chat_id]
+        2. حالة المحرك الفعلي داخل NTgCalls (assistant.calls) بحيث إذا كان IDLE أو غير متصل
+           أو انتهى وقت الأغنية الوحيدة في الطابور، يقوم بتصفير الطابور القديم فوراً ويرجع False
+           لتشتغل الأغنية الجديدة مباشرة!
+        """
+        if not await is_active_chat(chat_id):
+            return False
+
+        queue = db.get(chat_id)
+        if not queue:
+            await _clear_(chat_id)
+            self.active_calls.discard(chat_id)
+            return False
+
+        try:
+            assistant = await group_assistant(self, chat_id)
+            if not assistant:
+                await _clear_(chat_id)
+                self.active_calls.discard(chat_id)
+                return False
+
+            ntg_calls = await assistant.calls
+            call_info = ntg_calls.get(chat_id)
+
+            # إذا لم يكن الشات في مكالمات NTgCalls أصلاً أو كانت حالة البث IDLE (انتهت الأغنية)
+            if call_info is None or call_info.playback == TgCallData.Status.IDLE:
+                if not self.is_joining(chat_id):
+                    await _clear_(chat_id)
+                    self.active_calls.discard(chat_id)
+                    return False
+
+            # فحص إضافي: إذا كانت هناك أغنية واحدة فقط في الطابور وتجاوز عدادها مدتها الفعلية
+            if len(queue) == 1:
+                dur_sec = int(queue[0].get("seconds") or 0)
+                played_sec = int(queue[0].get("played") or 0)
+                if dur_sec > 0 and played_sec >= dur_sec + 5:
+                    await _clear_(chat_id)
+                    self.active_calls.discard(chat_id)
+                    return False
+        except Exception:
+            pass
+
+        return True
+
+    async def check_and_advance(self, chat_id: int) -> None:
+        """حارس تلقائي يستدعيه seeker.py عند انتهاء وقت الأغنية لضمان الانتقال للتالي أو إنهاء البث"""
+        if self.is_joining(chat_id):
+            return
+        current_time = asyncio.get_running_loop().time()
+        if chat_id in self._stream_end_cache and (current_time - self._stream_end_cache[chat_id] < 3.0):
+            return
+        self._stream_end_cache[chat_id] = current_time
+        with suppress(Exception):
+            assistant = await group_assistant(self, chat_id)
+            if assistant:
+                await self.play(assistant, chat_id)
 
     async def _edit_media_with_retry(self, message, media_obj: InputMediaPhoto, reply_markup):
         try:
@@ -216,7 +312,6 @@ class Call:
     async def seek_stream(self, chat_id: int, file_path: str, to_seek: str | int, duration: str | int, mode: str) -> None:
         async with self.get_lock(chat_id):
             assistant = await group_assistant(self, chat_id)
-            # استخدام -ss فقط في البداية لتسريع القفز الفوري وتفادي رفض ffprobe للمعامل -to
             ffmpeg_opts = f"-ss {to_seek} "
             is_video = mode == "video"
             stream = _build_stream(file_path, video=is_video, ffmpeg_opts=ffmpeg_opts)
@@ -401,18 +496,19 @@ class Call:
         assistants = list(filter(None, [self.one, self.two, self.three, self.four, self.five]))
 
         for assistant in assistants:
-            @assistant.on_update(filters.stream_end(StreamEnded.Type.AUDIO))
+            # الاستماع لانتهاء الصوت أو الفيديو مع منع التكرار عبر _stream_end_cache
+            @assistant.on_update(filters.stream_end())
             async def stream_end_handler(client: PyTgCalls, update: Update):
                 if isinstance(update, StreamEnded):
                     chat_id = update.chat_id
 
                     current_time = asyncio.get_running_loop().time()
                     if chat_id in self._stream_end_cache:
-                        if current_time - self._stream_end_cache[chat_id] < 2.0:
+                        if current_time - self._stream_end_cache[chat_id] < 2.5:
                             return
                     self._stream_end_cache[chat_id] = current_time
                     self._stream_end_cache = {
-                        cid: t for cid, t in self._stream_end_cache.items() if current_time - t < 5.0
+                        cid: t for cid, t in self._stream_end_cache.items() if current_time - t < 6.0
                     }
 
                     LOGGER(__name__).info(f"Stream ended for chat {chat_id}")
@@ -446,6 +542,8 @@ class Call:
             if not check:
                 await _clear_(chat_id)
                 self.active_calls.discard(chat_id)
+                with suppress(Exception):
+                    await client.leave_call(chat_id, close=False)
                 return
 
             popped = None
@@ -461,14 +559,15 @@ class Call:
                     await auto_clean(popped)
 
                 if not check:
+                    # حذف رسالة المشغل السابقة إن وجدت عند انتهاء الطابور
+                    if popped and popped.get("mystic"):
+                        with suppress(Exception):
+                            await popped.get("mystic").delete()
+
                     await _clear_(chat_id)
                     self.active_calls.discard(chat_id)
                     with suppress(Exception):
                         await client.leave_call(chat_id, close=False)
-
-                    if getattr(config, "AUTO_END", False):
-                        with suppress(Exception):
-                            await app.send_message(chat_id, "✅ Queue finished. Stream ended automatically.")
                     return
             except Exception:
                 await _clear_(chat_id)
@@ -488,10 +587,8 @@ class Call:
             is_video = str(streamtype) == "video"
             check[0]["played"] = 0
 
-            # 🚀 تشغيل توليد الصورة المصغرة وجلب الرابط المباشر بالتوازي (Parallel Execution)
             thumb_task = asyncio.create_task(get_thumb(videoid)) if videoid else None
 
-            # استباق جلب الرابط المباشر للأغنية التالية في الطابور (إن وجدت)
             if len(check) > 1 and check[1].get("vidid"):
                 next_vid = check[1].get("vidid")
                 if len(str(next_vid)) == 11:
@@ -530,7 +627,6 @@ class Call:
                 try:
                     await client.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
                 except Exception:
-                    # في حال انتهاء صلاحية الرابط في الكاش، نمسح الكاش ونجلب رابطاً جديداً فوراً
                     if needs_yt_resolve and videoid:
                         YouTube.invalidate_cache(videoid)
                         fresh_link = await YouTube.get_direct_link(
@@ -558,7 +654,9 @@ class Call:
                 button = stream_markup(_, chat_id)
 
                 with suppress(Exception):
-                    if db[chat_id][0].get("mystic"):
+                    if popped and popped.get("mystic"):
+                        await popped.get("mystic").delete()
+                    elif db[chat_id][0].get("mystic"):
                         await db[chat_id][0].get("mystic").delete()
 
                 caption_text = _["stream_1"].format(
@@ -586,6 +684,8 @@ class Call:
                 LOGGER(__name__).error(f"Queue Play Error: {e}")
                 await _clear_(chat_id)
                 self.active_calls.discard(chat_id)
+                with suppress(Exception):
+                    await client.leave_call(chat_id, close=False)
                 with suppress(Exception):
                     await app.send_message(original_chat_id, "❌ Failed to switch stream.")
 
