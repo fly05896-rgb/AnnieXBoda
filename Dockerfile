@@ -36,7 +36,7 @@ RUN grep -v -E -i '^(py-tgcalls|pytgcalls|tgcalls|deepai|numba|llvmlite|quimb)' 
 RUN uv pip install --no-cache \
     g4f \
     curl_cffi \
-    py-tgcalls==3.0.0
+    py-tgcalls
 
 # إعداد yt-dlp
 RUN mkdir -p /etc/yt-dlp && \
