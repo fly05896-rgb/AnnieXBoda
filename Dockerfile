@@ -2,7 +2,6 @@ FROM python:3.12
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# 🚀 بيئة إنتاج نظيفة وسريعة 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,7 +11,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# 🚀 تثبيت الحزم الأساسية
 RUN apt-get update --fix-missing && \
     apt-get install -y --no-install-recommends \
     build-essential cmake git curl wget unzip \
@@ -24,32 +22,26 @@ RUN apt-get update --fix-missing && \
 
 RUN uv pip install --upgrade setuptools wheel
 
-# نسخ المتطلبات وتصفيتها
 COPY requirements.txt .
 
-# 🚀 تصفية المتطلبات لمنع تثبيت tgcalls أو pytgcalls القديمة عن طريق الخطأ
 RUN grep -v -E -i '^(py-tgcalls|pytgcalls|tgcalls|deepai|numba|llvmlite|quimb)' requirements.txt > filtered.txt && \
     uv pip install --no-cache -r filtered.txt
 
-# 🚀 التثبيت المباشر للمكاتب الإضافية 
-# (تم تحديد py-tgcalls 3.0.0 لضمان الاعتماد على ntgcalls)
 RUN uv pip install --no-cache \
     g4f \
     curl_cffi \
-    py-tgcalls
+    orjson \
+    ntgcalls \
+    py-tgcalls \
+    yt-dlp
 
-# إعداد yt-dlp
 RUN mkdir -p /etc/yt-dlp && \
     echo "--remote-components ejs:github" > /etc/yt-dlp.conf
 
-# 🚀 التخزين المؤقت لـ yt-dlp
 RUN yt-dlp "ytsearch1:test" --dump-json > /dev/null 2>&1 || true
 
-# نسخ باقي ملفات البوت
 COPY . .
 
-# 🚀 حذف المجلدات المحلية المزعجة حتى لا تتعارض مع المكتبة الرسمية داخل الحاوية
 RUN rm -rf /app/pytgcalls /app/py-tgcalls /app/tgcalls
 
-# 🚀 التشغيل المباشر والصاروخي للبوت
 CMD ["python3", "-m", "AnnieXMedia"]
