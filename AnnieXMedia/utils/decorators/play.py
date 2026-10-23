@@ -1,4 +1,6 @@
-﻿# Authored By Certified Coders © 2025
+# Authored By Certified Coders © 2026
+# File Path: AnnieXMedia/utils/decorators/play.py
+
 import asyncio
 
 from pyrogram.enums import ChatMemberStatus
@@ -14,6 +16,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import PLAYLIST_IMG_URL, SUPPORT_CHAT, adminlist
 from strings import get_string
 from AnnieXMedia import YouTube, app
+from AnnieXMedia.core.call import StreamController
 from AnnieXMedia.misc import SUDOERS
 from AnnieXMedia.utils.database import (
     get_assistant,
@@ -21,7 +24,6 @@ from AnnieXMedia.utils.database import (
     get_lang,
     get_playmode,
     get_playtype,
-    is_active_chat,
     is_maintenance,
 )
 from AnnieXMedia.utils.inline import botplaylist_markup
@@ -82,7 +84,8 @@ def PlayWrapper(command):
                     caption=_["play_18"],
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
-        if message.command[0][0] == "c":
+        cmd0 = message.command[0] if message.command else ""
+        if cmd0.startswith("c"):
             chat_id = await get_cmode(message.chat.id)
             if chat_id is None:
                 return await message.reply_text(_["setting_7"])
@@ -105,22 +108,24 @@ def PlayWrapper(command):
                 elif message.from_user.id not in admins:
                     return await message.reply_text(_["play_4"])
 
-        if message.command[0][0] == "v":
+        if cmd0.startswith("v") or cmd0 in ("فيد", "فيديو"):
             video = True
         else:
-            if "-v" in message.text:
+            if "-v" in (message.text or ""):
                 video = True
             else:
-                video = True if message.command[0][1] == "v" else None
+                video = True if (len(cmd0) > 1 and cmd0[1] == "v") else None
 
-        if message.command[0][-1] == "e":
-            if not await is_active_chat(chat_id):
+        is_really_active = await StreamController.is_truly_playing(chat_id)
+
+        if cmd0.endswith("e"):
+            if not is_really_active:
                 return await message.reply_text(_["play_16"])
             fplay = True
         else:
             fplay = None
 
-        if not await is_active_chat(chat_id):
+        if not is_really_active:
             userbot = await get_assistant(chat_id)
             try:
                 try:
@@ -177,10 +182,8 @@ def PlayWrapper(command):
                     await asyncio.sleep(1)
                     await userbot.join_chat(invitelink)
                 except InviteHashExpired:
-                    # Remove expired invite link from the cache.
                     if chat_id in links:
                         del links[chat_id]
-                    # Generate a new invite link.
                     try:
                         invitelink = await app.export_chat_invite_link(chat_id)
                     except ChatAdminRequired:
@@ -193,7 +196,6 @@ def PlayWrapper(command):
                         invitelink = invitelink.replace(
                             "https://t.me/+", "https://t.me/joinchat/"
                         )
-                    # Update the cache.
                     links[chat_id] = invitelink
                     await userbot.join_chat(invitelink)
                 except InviteRequestSent:
