@@ -1,13 +1,13 @@
-# Authored By Certified Coders © 2025
+# Authored By Certified Coders © 2026
+# File Path: AnnieXMedia/plugins/bot/start.py
+
 import time
-import asyncio
 from pyrogram import filters
 from pyrogram.enums import ChatType
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
-from youtubesearchpython.aio import VideosSearch
 
 import config
-from AnnieXMedia import app
+from AnnieXMedia import YouTube, app
 from AnnieXMedia.misc import _boot_
 from AnnieXMedia.plugins.sudo.sudoers import sudoers_list
 from AnnieXMedia.utils.database import (
@@ -25,9 +25,9 @@ from AnnieXMedia.utils.inline.start import private_panel, start_panel
 from config import BANNED_USERS
 from strings import get_string
 
-# استخدام getattr لتجنب الأخطاء لو المتغير مش موجود في الكونفج
 START_IMG_URL = getattr(config, "START_IMG_URL", "https://files.catbox.moe/ompn1o.jpg")
 LOGGER_ID = getattr(config, "LOGGER_ID", config.OWNER_ID)
+
 
 @app.on_message(filters.command(["start"]) & filters.private & ~BANNED_USERS)
 @LanguageStart
@@ -35,9 +35,9 @@ async def start_pm(client, message: Message, _):
     await add_served_user(message.from_user.id)
     try:
         await message.react("❤")
-    except:
+    except Exception:
         pass
-        
+
     if len(message.text.split()) > 1:
         name = message.text.split(None, 1)[1]
         if name[0:4] == "help":
@@ -47,39 +47,36 @@ async def start_pm(client, message: Message, _):
                 caption=_["help_1"].format(config.SUPPORT_CHAT),
                 reply_markup=keyboard,
             )
-            
+
         if name[0:3] == "sud":
             await sudoers_list(client=client, message=message, _=_)
             if await is_on_off(2):
                 if LOGGER_ID != 0:
                     return await app.send_message(
                         chat_id=LOGGER_ID,
-                        text=f"{message.from_user.mention} قــام بـبـدء الـبـوت لـمـعـرفـة <b>قـائـمـة الـمـطـوريـن</b>.\n\n<b>آيــدي الـشـخـص :</b> <code>{message.from_user.id}</code>\n<b>الـيـوزر :</b> @{message.from_user.username}",
+                        text=(
+                            f"{message.from_user.mention} قــام بـبـدء الـبـوت لـمـعـرفـة <b>قـائـمـة الـمـطـوريـن</b>.\n\n"
+                            f"<b>آيــدي الـشـخـص :</b> <code>{message.from_user.id}</code>\n"
+                            f"<b>الـيـوزر :</b> @{message.from_user.username}"
+                        ),
                     )
             return
-            
+
         if name[0:3] == "inf":
             m = await message.reply_text("🔎")
-            query = (str(name)).replace("info_", "", 1)
-            query = f"https://www.youtube.com/watch?v={query}"
-            
-            def _search():
-                return VideosSearch(query, limit=1).result()
+            vid = (str(name)).replace("info_", "", 1).strip()
 
             try:
-                # استخدام asyncio.to_thread ممتاز جداً ومتوافق مع بايثون 3.13 لمنع حظر الـ Event Loop
-                results = await asyncio.to_thread(_search)
-                result = results["result"][0]
-                
-                title = result["title"]
-                duration = result["duration"]
-                views = result["viewCount"]["short"]
-                thumbnail = result["thumbnails"][0]["url"].split("?")[0]
-                channellink = result["channel"]["link"]
-                channel = result["channel"]["name"]
-                link = result["link"]
-                published = result["publishedTime"]
-                
+                info, _ = await YouTube.track(vid, videoid=vid)
+                title = info.get("title", "Unknown")
+                duration = info.get("duration_min", "0:00")
+                views = info.get("views", "YouTube")
+                thumbnail = info.get("thumb") or START_IMG_URL
+                channel = info.get("channel", "YouTube")
+                link = info.get("link") or f"https://www.youtube.com/watch?v={vid}"
+                channellink = "https://www.youtube.com"
+                published = "YouTube"
+
                 searched_text = _["start_6"].format(
                     title, duration, views, published, channellink, channel, app.mention
                 )
@@ -102,39 +99,39 @@ async def start_pm(client, message: Message, _):
                     if LOGGER_ID != 0:
                         return await app.send_message(
                             chat_id=LOGGER_ID,
-                            text=f"{message.from_user.mention} قــام بـبـدء الـبـوت لـمـعـرفـة <b>مـعـلـومـات الأغـنـيـة</b>.\n\n<b>آيــدي الـشـخـص :</b> <code>{message.from_user.id}</code>\n<b>الـيـوزر :</b> @{message.from_user.username}",
+                            text=(
+                                f"{message.from_user.mention} قــام بـبـدء الـبـوت لـمـعـرفـة <b>مـعـلـومـات الأغـنـيـة</b>.\n\n"
+                                f"<b>آيــدي الـشـخـص :</b> <code>{message.from_user.id}</code>\n"
+                                f"<b>الـيـوزر :</b> @{message.from_user.username}"
+                            ),
                         )
             except Exception as e:
                 await m.edit_text(f"Error: {e}")
                 return
     else:
         out = private_panel(_)
-        
-        # أولوية الصورة (صورة البوت، ثم صورة المستخدم، ثم الصورة الافتراضية)
+
         if client.me.photo:
             chat_photo = client.me.photo.big_file_id
         elif message.from_user.photo:
             chat_photo = message.from_user.photo.big_file_id
         else:
             chat_photo = START_IMG_URL
-        
-        # الإرسال الفوري بدون أي رسائل تحميل أو انيميشن
+
         try:
             await message.reply_photo(
                 photo=chat_photo,
                 caption=_["start_2"].format(message.from_user.mention, app.mention),
                 reply_markup=InlineKeyboardMarkup(out),
             )
-        except Exception as e:
-            # Fallback في حال فشل إرسال صورة الحساب
+        except Exception:
             await message.reply_photo(
                 photo=START_IMG_URL,
                 caption=_["start_2"].format(message.from_user.mention, app.mention),
                 reply_markup=InlineKeyboardMarkup(out),
             )
 
-        # إرسال إشعار الدخول للمطور (اللوج)
-        if getattr(config, "LOG", True): 
+        if getattr(config, "LOG", True):
             if LOGGER_ID != 0:
                 sender_id = message.from_user.id
                 sender_name = message.from_user.first_name
@@ -143,8 +140,9 @@ async def start_pm(client, message: Message, _):
                         LOGGER_ID,
                         f"{message.from_user.mention} قــام بـبـدء الـبـوت .. ⚡\n\n**آيــدي الـشـخـص :** {sender_id}\n**الاســم:** {sender_name}",
                     )
-                except:
+                except Exception:
                     pass
+
 
 @app.on_message(filters.command(["start"]) & filters.group & ~BANNED_USERS)
 @LanguageStart
@@ -158,6 +156,7 @@ async def start_gp(client, message: Message, _):
     )
     return await add_served_chat(message.chat.id)
 
+
 @app.on_message(filters.new_chat_members, group=-1)
 async def welcome(client, message: Message):
     for member in message.new_chat_members:
@@ -167,7 +166,7 @@ async def welcome(client, message: Message):
             if await is_banned_user(member.id):
                 try:
                     await message.chat.ban_member(member.id)
-                except:
+                except Exception:
                     pass
             if member.id == app.id:
                 if message.chat.type != ChatType.SUPERGROUP:
