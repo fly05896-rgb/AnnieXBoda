@@ -1,5 +1,4 @@
-#===== Core Async / HTTP / JSON (Speedups) =====
-​aiofiles
+aiofiles
 aiohttp[speedups]
 httpx[http2,brotli]
 orjson
@@ -9,14 +8,11 @@ cachetools
 brotli
 certifi
 flet
-​#===== Crypto / Security =====
-​argon2-cffi
+argon2-cffi
 pycryptodome
 pytgcrypto
-#​===== Scheduling =====
-​apscheduler
-#​===== Media / Audio / Video =====
-​yt-dlp==2026.10.21
+apscheduler
+yt-dlp
 pydub
 mutagen
 hachoir
@@ -26,26 +22,21 @@ opencv-python-headless
 numpy
 pillow
 wget
-#​===== Arabic Text Support =====
-​arabic-reshaper
+arabic-reshaper
 python-bidi
-​#===== Telegram / Calls (PyTgCalls 3.0.0 + NTgCalls 3.0.5 + Kurigram 2.2.26) =====
-​ntgcalls>=3.0.5,<4.0.0
-py-tgcalls==3.0.0
-kurigram~=2.2.26
+ntgcalls
+py-tgcalls
+kurigram
 pyromod
-#​===== Web / API / Servers =====
-​fastapi
+fastapi
 flask
 uvicorn
 python-multipart
 python-dotenv
 requests
-#​===== Databases =====
-​motor
+motor
 pymongo
-​#===== Search / AI / TTS =====
-​edge-tts
+edge-tts
 gtts
 googletrans
 gpytranslate
@@ -55,8 +46,7 @@ spotipy
 lexica-api
 nekosbest
 g4f
-#​===== Scraping / Parsing =====
-​beautifulsoup4
+beautifulsoup4
 bs4
 python-whois
 pyyaml
@@ -64,8 +54,7 @@ unidecode
 rapidfuzz
 fuzzywuzzy
 python-Levenshtein
-#​===== Utilities =====
-​pyfiglet
+pyfiglet
 pyshorteners
 qrcode
 telegraph
@@ -73,12 +62,9 @@ speedtest-cli
 future
 gitpython
 heroku3
-#​===== Images =====
-​bing_image_downloader
-#​===== Time / Locale =====
-​pytz
+bing_image_downloader
+pytz
 py-yt-search
-git+https://www.google.com/search?q=https://github.com/q058961234-web/youtube-search-python.git
-#​===== AI Moderation =====
-​nudenet
+git+https://github.com/q058961234-web/youtube-search-python.git
+nudenet
 onnxruntime
