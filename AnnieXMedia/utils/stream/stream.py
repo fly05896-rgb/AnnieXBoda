@@ -1,5 +1,6 @@
 # Authored By Certified Coders © 2026
-# System: Stream Controller (Real NTgCalls Playback Check & Parallel Queue Bridge)
+# File Path: AnnieXMedia/utils/stream/stream.py
+# System: Stream Controller (Real NTgCalls Playback Check & Instant Pre-Cached Link Bridge)
 
 import asyncio
 import contextlib
@@ -25,14 +26,12 @@ from AnnieXMedia.utils.stream.queue import put_queue, put_queue_index
 
 
 async def safe_delete(message) -> None:
-    """Safely deletes a message without throwing errors."""
     with contextlib.suppress(Exception):
         if message:
             await message.delete()
 
 
 async def _sync_video_state(chat_id: int, is_video: bool) -> None:
-    """Syncs the video chat state in the database."""
     with contextlib.suppress(Exception):
         if is_video:
             await add_active_video_chat(chat_id)
@@ -68,14 +67,13 @@ async def stream(
 
     match streamtype:
         # --------------------------
-        # 1. CUSTOM MODE (Inline File Playback)
+        # 1. CUSTOM MODE
         # --------------------------
         case "custom":
             vidid = result.get("vidid", "")
             title = result.get("title", "").title()
             duration_min = result.get("duration_min", "00:00")
 
-            # 🔥 فحص حقيقي من داخل محرك NTgCalls لمنع دخول الأغنية في طابور وهمي إذا انتهت الأغنية السابقة
             is_active = await StreamController.is_truly_playing(chat_id)
 
             if is_active and not forceplay:
@@ -98,7 +96,7 @@ async def stream(
                         reply_markup=InlineKeyboardMarkup(button),
                     )
                 except Exception:
-                    await safe_delete(mystic)
+                    asyncio.create_task(safe_delete(mystic))
                     await app.send_message(
                         original_chat_id,
                         text=_["queue_4"].format(position, title[:27], duration_min, user_name),
@@ -158,7 +156,7 @@ async def stream(
             return
 
         # --------------------------
-        # 2. PLAYLIST MODE (Parallel Batch Details + Instant First Track Play)
+        # 2. PLAYLIST MODE
         # --------------------------
         case "playlist":
             msg = f"{_['play_19']}\n\n"
@@ -212,7 +210,7 @@ async def stream(
                         )
                         img = f"https://i.ytimg.com/vi/{vidid}/hqdefault.jpg" if vidid else config.YOUTUBE_IMG_URL
                         button = stream_markup(_, chat_id)
-                        await safe_delete(mystic)
+                        asyncio.create_task(safe_delete(mystic))
 
                         run = await app.send_photo(
                             original_chat_id,
@@ -314,7 +312,6 @@ async def stream(
                 case _:
                     q_path = file_path
 
-            # 🔥 فحص البث الحقيقي داخل NTgCalls قبل إضافة الأغنية لطابور الانتظار!
             is_active = await StreamController.is_truly_playing(chat_id)
 
             # --- ACTION 1: ADD TO QUEUE ---
@@ -353,14 +350,14 @@ async def stream(
                             reply_markup=InlineKeyboardMarkup(button),
                         )
                     except Exception:
-                        await safe_delete(mystic)
+                        asyncio.create_task(safe_delete(mystic))
                         await app.send_message(
                             original_chat_id,
                             text=_["queue_4"].format(position, title[:27], duration_min, user_name),
                             reply_markup=InlineKeyboardMarkup(button),
                         )
                 else:
-                    await safe_delete(mystic)
+                    asyncio.create_task(safe_delete(mystic))
                     await app.send_message(
                         original_chat_id,
                         text=_["queue_4"].format(position, title[:27], duration_min, user_name),
@@ -427,12 +424,12 @@ async def stream(
 
             await _sync_video_state(chat_id, is_video)
 
-            await safe_delete(mystic)
+            asyncio.create_task(safe_delete(mystic))
             button = stream_markup(_, chat_id)
 
             match streamtype:
                 case "soundcloud":
-                    photo = config.SOUNCLOUD_IMG_URL
+                    photo = getattr(config, "SOUNCLOUD_IMG_URL", getattr(config, "SOUNDCLOUD_IMG_URL", config.YOUTUBE_IMG_URL))
                     caption = _["stream_1"].format(config.SUPPORT_CHAT, title[:23], duration_min, user_name)
                 case "telegram":
                     photo = config.TELEGRAM_VIDEO_URL if is_video else config.TELEGRAM_AUDIO_URL
