@@ -1,8 +1,9 @@
-# Authored By Certified Coders © 2025
-import asyncio
-import requests
+# Authored By Certified Coders © 2026
+# File Path: AnnieXMedia/utils/cookie_handler.py
+
 from pathlib import Path
 from urllib.parse import urlsplit
+import aiohttp
 
 from config import COOKIE_URL
 from AnnieXMedia.utils.errors import capture_internal_err
@@ -41,17 +42,17 @@ async def fetch_and_store_cookies():
     raw_url = resolve_raw_cookie_url(COOKIE_URL)
 
     try:
-        response = await asyncio.to_thread(
-            requests.get,
-            raw_url,
-            timeout=15,
-            headers={"User-Agent": "annie-cookie-fetcher/1.0"},
-        )
-        response.raise_for_status()
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                raw_url,
+                headers={"User-Agent": "annie-cookie-fetcher/2.0"},
+            ) as response:
+                if response.status != 200:
+                    raise ConnectionError(f"HTTP {response.status}")
+                cookies = (await response.text() or "").strip()
     except Exception as e:
         raise ConnectionError(f"⚠️ ᴄᴀɴ'ᴛ ꜰᴇᴛᴄʜ ᴄᴏᴏᴋɪᴇs:\n{e}")
-
-    cookies = (response.text or "").strip()
 
     if not cookies.startswith("# Netscape"):
         raise ValueError("⚠️ ɪɴᴠᴀʟɪᴅ ᴄᴏᴏᴋɪᴇ ꜰᴏʀᴍᴀᴛ. ɴᴇᴇᴅs ɴᴇᴛsᴄᴀᴘᴇ ꜰᴏʀᴍᴀᴛ.")
