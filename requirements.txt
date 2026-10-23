@@ -1,24 +1,22 @@
-aiofiles
-# تفعيل تسريع DNS و C-Parsin
+===== Core Async / HTTP / JSON (Speedups) =====
+​aiofiles
 aiohttp[speedups]
 httpx[http2,brotli]
+orjson
+curl_cffi
 psutil
 cachetools
 brotli
 certifi
-# أسرع مكتبة JSON في العالم (مهمة لـ FastAPI)
-orjson
 flet
-# ===== Crypto / Security =====
-argon2-cffi
+​===== Crypto / Security =====
+​argon2-cffi
 pycryptodome
 pytgcrypto
-
-# ===== Scheduling =====
-apscheduler
-
-# ===== Media / Audio / Video ====
-yt-dlp==2026.8.19
+​===== Scheduling =====
+​apscheduler
+​===== Media / Audio / Video =====
+​yt-dlp==2026.10.21
 pydub
 mutagen
 hachoir
@@ -28,31 +26,26 @@ opencv-python-headless
 numpy
 pillow
 wget
-
-# ===== Arabic Text Support (لحل مشكلة العربي المقطع في الصور) =====
-arabic-reshaper
+​===== Arabic Text Support =====
+​arabic-reshaper
 python-bidi
-
-# ===== Telegram / Calls =====
-ntgcalls
-kurigram
+​===== Telegram / Calls (PyTgCalls 3.0.0 + NTgCalls 3.0.5 + Kurigram 2.2.26) =====
+​ntgcalls>=3.0.5,<4.0.0
+py-tgcalls==3.0.0
+kurigram~=2.2.26
 pyromod
-
-# ===== Web / API / Servers =====
-fastapi
+​===== Web / API / Servers =====
+​fastapi
 flask
-# تفعيل Cython Parsers للسرعة القصوى
 uvicorn
 python-multipart
 python-dotenv
 requests
-
-# ===== Databases =====
-motor
+​===== Databases =====
+​motor
 pymongo
-
-# ===== Search / AI / TTS =====
-edge-tts
+​===== Search / AI / TTS =====
+​edge-tts
 gtts
 googletrans
 gpytranslate
@@ -62,9 +55,8 @@ spotipy
 lexica-api
 nekosbest
 g4f
-
-# ===== Scraping / Parsing =====
-beautifulsoup4
+​===== Scraping / Parsing =====
+​beautifulsoup4
 bs4
 python-whois
 pyyaml
@@ -72,9 +64,8 @@ unidecode
 rapidfuzz
 fuzzywuzzy
 python-Levenshtein
-
-# ===== Utilities =====
-pyfiglet
+​===== Utilities =====
+​pyfiglet
 pyshorteners
 qrcode
 telegraph
@@ -82,21 +73,12 @@ speedtest-cli
 future
 gitpython
 heroku3
-
-# ===== Images =====
-bing_image_downloader
-
-# ===== CURL (Ultra Fast HTTP for yt-dlp fallback) =====
-curl_cffi
-
-# ===== Time / Locale =====
-pytz
+​===== Images =====
+​bing_image_downloader
+​===== Time / Locale =====
+​pytz
 py-yt-search
-# ===== YouTube Search (patched fork) =====
-git+https://github.com/q058961234-web/youtube-search-python.git
-# Ai
-nudenet
+git+https://www.google.com/search?q=https://github.com/q058961234-web/youtube-search-python.git
+​===== AI Moderation =====
+​nudenet
 onnxruntime
-opencv-python-headless
-
-nudenet
