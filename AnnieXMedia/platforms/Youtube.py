@@ -1,9 +1,14 @@
+# Authored By Certified Coders © 2026
+# System: Ultra-Fast YouTube Engine (yt-dlp 2026.10.21 + Innertube Multi-Client + orjson)
+
 import asyncio
+import json
 import logging
 import os
 import re
 import socket
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -12,7 +17,72 @@ import aiohttp
 from pyrogram import enums
 from yt_dlp import YoutubeDL
 
+try:
+    import orjson
+
+    def _json_dumps(obj: Any) -> bytes:
+        return orjson.dumps(obj)
+
+    def _json_loads(data: bytes | str) -> Any:
+        return orjson.loads(data)
+except ImportError:
+    def _json_dumps(obj: Any) -> bytes:
+        return json.dumps(obj).encode("utf-8")
+
+    def _json_loads(data: bytes | str) -> Any:
+        return json.loads(data)
+
+from AnnieXMedia.utils.cookie_handler import COOKIE_PATH
+
 log = logging.getLogger("AnnieXMedia.YouTube")
+
+# ── تفعيل الكاش الدائم في الرامات لـ yt-dlp 2026.10.21 ──
+_SHARED_CODE_CACHE: dict = {}
+_SHARED_PLAYER_CACHE: dict = {}
+
+try:
+    from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
+    EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE = True
+except Exception:
+    pass
+
+try:
+    from yt_dlp.extractor.youtube._video import YoutubeIE
+    if not getattr(YoutubeIE, "_annie_cache_patched", False):
+        _orig_yt_init = YoutubeIE.__init__
+
+        def _fast_yt_init(self, *args, **kwargs):
+            _orig_yt_init(self, *args, **kwargs)
+            self._code_cache = _SHARED_CODE_CACHE
+            self._player_cache = _SHARED_PLAYER_CACHE
+
+        YoutubeIE.__init__ = _fast_yt_init
+        YoutubeIE._annie_cache_patched = True
+except Exception:
+    pass
+
+
+VISIONOS_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+)
+TV_SAMSUNG_UA = (
+    "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) "
+    "AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1"
+)
+WEB_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _get_valid_cookiefile() -> str | None:
+    try:
+        if COOKIE_PATH and os.path.exists(COOKIE_PATH) and os.path.getsize(COOKIE_PATH) > 100:
+            return str(COOKIE_PATH)
+    except Exception:
+        pass
+    return None
 
 
 class YouTubeAPI:
@@ -27,9 +97,16 @@ class YouTubeAPI:
         self._pool = ThreadPoolExecutor(max_workers=16)
         self._url_cache: dict[str, tuple[str, float]] = {}
         self._meta_cache: dict[str, tuple[dict[str, Any], float]] = {}
+        self._stream_info_cache: dict[str, tuple[dict[str, Any], float]] = {}
+        self._inflight_player: dict[str, asyncio.Future] = {}
         self._cache_ttl = 3600
         self._http_session: aiohttp.ClientSession | None = None
 
+        cache_dir = "/dev/shm/ytdlp_cache" if os.path.exists("/dev/shm") else "/tmp/ytdlp_cache"
+
+        # 🚀 عملاء yt-dlp 2026.10.21 الجدد:
+        # تم استبعاد android و android_vr و ios لأنها تطلب PO Token أو معطلة في 2026.10.21
+        # وتم اعتماد visionos (بدون JS وبدون PO Token) + tv_samsung (العميل الافتراضي الأول الجديد في 2026.10.21)
         self.fast_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -43,10 +120,10 @@ class YouTubeAPI:
             "skip_download": True,
             "socket_timeout": 5,
             "retries": 2,
-            "cachedir": "/tmp/ytdlp_cache",
+            "cachedir": cache_dir,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["visionos", "android"],
+                    "player_client": ["visionos", "tv_samsung"],
                     "player_skip": ["webpage", "configs", "initial_data", "js"],
                     "skip": ["hls", "dash", "translated_subs"],
                     "formats": ["missing_pot"],
@@ -59,20 +136,23 @@ class YouTubeAPI:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
-            "cookiefile": None,
+            "cookiefile": _get_valid_cookiefile(),
             "force_ipv4": True,
             "source_address": "0.0.0.0",
             "nocheckcertificate": True,
             "noplaylist": True,
             "skip_download": True,
-            "cachedir": "/tmp/ytdlp_cache",
+            "socket_timeout": 8,
+            "retries": 2,
+            "cachedir": cache_dir,
             "js_runtimes": {"deno": {}, "node": {}},
             "remote_components": ["ejs:github"],
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["tv_samsung", "web_embedded"],
+                    "player_client": ["tv_samsung", "tv_downgraded", "web_embedded"],
                     "player_skip": ["webpage", "initial_data"],
                     "skip": ["translated_subs"],
+                    "formats": ["missing_pot"],
                     "fetch_pot": ["never"],
                 }
             },
@@ -80,16 +160,32 @@ class YouTubeAPI:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._http_session is None or self._http_session.closed:
-            # إجبار IPv4 (AF_INET) لمنع خطأ Failed to make request وتعليق البحث نهائياً
             connector = aiohttp.TCPConnector(
                 family=socket.AF_INET,
-                limit=100,
-                ttl_dns_cache=600,
+                limit=128,
+                limit_per_host=64,
+                ttl_dns_cache=1800,
+                use_dns_cache=True,
+                keepalive_timeout=120,
+                enable_cleanup_closed=True,
                 ssl=False,
             )
-            timeout = aiohttp.ClientTimeout(total=4, connect=2)
+            timeout = aiohttp.ClientTimeout(total=5, connect=2)
             self._http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
         return self._http_session
+
+    def get_stream_headers(self, url: str = "") -> dict[str, str]:
+        """تجهيز الهيدرز المتوافقة مع روابط googlevideo لمنع HTTP 403 في FFmpeg/NTgCalls"""
+        if "c=TVHTML5" in str(url):
+            return {"User-Agent": TV_SAMSUNG_UA}
+        return {"User-Agent": VISIONOS_UA}
+
+    def invalidate_cache(self, vid: str) -> None:
+        """مسح كاش الفيديو في حال انتهاء صلاحية الرابط المباشر"""
+        vid = self._extract_vid(vid, vid)
+        for suffix in ("a", "v"):
+            self._url_cache.pop(f"{vid}:{suffix}", None)
+            self._stream_info_cache.pop(f"{vid}:{suffix}", None)
 
     def _extract_vid(self, link: str, videoid: str | bool | None = None) -> str:
         if videoid is True and len(str(link)) == 11:
@@ -100,6 +196,8 @@ class YouTubeAPI:
         if len(vid) == 11:
             return vid
         s_link = str(link).strip()
+        if s_link.endswith("_v") and len(s_link) == 13:
+            return s_link[:-2]
         if len(s_link) == 11 and not s_link.startswith("http") and " " not in s_link:
             return s_link
         if "v=" in s_link:
@@ -109,10 +207,10 @@ class YouTubeAPI:
                     return extracted
             except IndexError:
                 pass
-        for prefix in ("youtu.be/", "/shorts/", "/live/"):
+        for prefix in ("youtu.be/", "/shorts/", "/live/", "/embed/", "/v/"):
             if prefix in s_link:
                 try:
-                    extracted = s_link.split(prefix)[1].split("?")[0].split("&")[0]
+                    extracted = s_link.split(prefix)[1].split("?")[0].split("&")[0].split("/")[0]
                     if len(extracted) == 11:
                         return extracted
                 except IndexError:
@@ -127,16 +225,72 @@ class YouTubeAPI:
         h, m = divmod(m, 60)
         return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m}:{s:02d}"
 
-    async def _innertube_player(self, vid: str) -> dict[str, Any] | None:
-        """جلب بيانات الفيديو من نقطة player مباشرة عبر IPv4 في 80ms"""
-        now = time.time()
-        cached = self._meta_cache.get(vid)
-        if cached and cached[1] > now:
-            return cached[0]
+    async def _request_innertube_client(
+        self,
+        vid: str,
+        client_payload: dict[str, Any],
+        client_id: str,
+        client_ver: str,
+        user_agent: str,
+        third_party_embed: bool = False,
+    ) -> dict[str, Any] | None:
+        context: dict[str, Any] = {"client": client_payload}
+        if third_party_embed:
+            context["thirdParty"] = {"embedUrl": "https://www.reddit.com/"}
 
         payload = {
-            "context": {
-                "client": {
+            "context": context,
+            "videoId": vid,
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": user_agent,
+            "X-YouTube-Client-Name": client_id,
+            "X-YouTube-Client-Version": client_ver,
+            "Origin": "https://www.youtube.com",
+        }
+        try:
+            session = await self._get_session()
+            async with session.post(
+                "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                data=_json_dumps(payload),
+                headers=headers,
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                raw_bytes = await resp.read()
+                return _json_loads(raw_bytes)
+        except Exception as e:
+            log.debug(f"Innertube client {client_payload.get('clientName')} error: {e}")
+            return None
+
+    async def _innertube_player(self, vid: str) -> dict[str, Any] | None:
+        """
+        دمج جلب بيانات الفيديو + استخراج وتخزين أفضل رابط صوت وفيديو وحجم الملف
+        في طلب واحد فقط (~75ms) باستخدام orjson + Multi-Client Innertube Fallback
+        """
+        now = time.time()
+        cached = self._meta_cache.get(vid)
+        if cached and cached[1] > now and (f"{vid}:a" in self._url_cache or f"{vid}:v" in self._url_cache):
+            return cached[0]
+
+        if inflight := self._inflight_player.get(vid):
+            try:
+                return await inflight
+            except Exception:
+                pass
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._inflight_player[vid] = fut
+
+        try:
+            # 1. العميل الأساسي الأسرع: VISIONOS 1.02 (يعطي روابط مباشرة صالحة بدون JS وبدون PO Token)
+            data = await self._request_innertube_client(
+                vid,
+                client_payload={
                     "clientName": "VISIONOS",
                     "clientVersion": "1.02",
                     "deviceMake": "Apple",
@@ -146,66 +300,189 @@ class YouTubeAPI:
                     "hl": "en",
                     "timeZone": "UTC",
                     "utcOffsetMinutes": 0,
-                }
-            },
-            "videoId": vid,
-            "contentCheckOk": True,
-            "racyCheckOk": True,
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
-            "X-YouTube-Client-Name": "101",
-            "X-YouTube-Client-Version": "1.02",
-            "Origin": "https://www.youtube.com",
-        }
-        try:
-            session = await self._get_session()
-            async with session.post(
-                "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-                json=payload,
-                headers=headers,
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
+                },
+                client_id="101",
+                client_ver="1.02",
+                user_agent=VISIONOS_UA,
+            )
 
-            vd = data.get("videoDetails") or {}
-            v_id = vd.get("videoId") or vid
-            title = vd.get("title")
-            if not title:
+            sd = (data or {}).get("streamingData") or {}
+            vd = (data or {}).get("videoDetails") or {}
+
+            # 2. إذا كان الفيديو مقيداً أو للأطفال (Made for Kids) أو بث مباشر بدون روابط في VISIONOS،
+            # ننتقل فوراً في نفس اللحظة إلى عميل IOS (للبثوث المباشرة HLS) أو WEB_EMBEDDED (لتخطي القيود)
+            has_direct_urls = any(
+                f.get("url") for f in (sd.get("formats", []) + sd.get("adaptiveFormats", []))
+            ) or bool(sd.get("hlsManifestUrl"))
+
+            if not has_direct_urls or not vd.get("title"):
+                ios_data = await self._request_innertube_client(
+                    vid,
+                    client_payload={
+                        "clientName": "IOS",
+                        "clientVersion": "21.26.4",
+                        "deviceMake": "Apple",
+                        "deviceModel": "iPhone16,2",
+                        "osName": "iPhone",
+                        "osVersion": "18.3.2.22D82",
+                        "hl": "en",
+                        "timeZone": "UTC",
+                        "utcOffsetMinutes": 0,
+                    },
+                    client_id="5",
+                    client_ver="21.26.4",
+                    user_agent="com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+                )
+                if ios_data and (ios_data.get("videoDetails", {}).get("title") or ios_data.get("streamingData")):
+                    data = ios_data
+                    sd = data.get("streamingData") or {}
+                    vd = data.get("videoDetails") or vd
+
+            if not vd.get("title"):
+                fut.set_result(None)
                 return None
 
-            is_live = bool(vd.get("isLive") or vd.get("isLiveContent") and int(vd.get("lengthSeconds") or 0) == 0)
+            v_id = vd.get("videoId") or vid
+            title = vd.get("title")
+            is_live = bool(
+                vd.get("isLive")
+                or (vd.get("isLiveContent") and int(vd.get("lengthSeconds") or 0) == 0)
+            )
             secs = int(vd.get("lengthSeconds") or 0)
             duration_min = "Live" if is_live else self._sec_to_min(secs)
+            views_count = vd.get("viewCount")
+            views_str = f"{int(views_count):,} Views" if str(views_count).isdigit() else "YouTube"
+            channel_name = vd.get("author") or "YouTube"
 
-            # حفظ الرابط المباشر في الكاش تلقائياً أثناء جلب التفاصيل لتوفير طلب كامل لاحقاً!
-            sd = data.get("streamingData") or {}
+            best_audio_url: str | None = None
+            best_audio_score: int = -1
+            best_audio_fmt: dict[str, Any] = {}
+
+            best_video_url: str | None = None
+            best_video_score: int = -1
+            best_video_fmt: dict[str, Any] = {}
+
             for fmt in sd.get("formats", []) + sd.get("adaptiveFormats", []):
-                if f_url := fmt.get("url"):
-                    itag = str(fmt.get("itag", ""))
-                    if itag == "18":
-                        self._url_cache[f"{v_id}:v"] = (f_url, now + self._cache_ttl)
-                        self._url_cache.setdefault(f"{v_id}:a", (f_url, now + self._cache_ttl))
-                    elif "audio" in str(fmt.get("mimeType", "")):
-                        self._url_cache[f"{v_id}:a"] = (f_url, now + self._cache_ttl)
+                f_url = fmt.get("url")
+                if not f_url:
+                    continue
+                itag = str(fmt.get("itag", ""))
+                mime = str(fmt.get("mimeType", ""))
+                bitrate = int(fmt.get("averageBitrate") or fmt.get("bitrate") or 0)
+                height = int(fmt.get("height") or 0)
+
+                # صيغ الفيديو المدمجة بصوت (مثل itag 18 = 360p mp4 أو itag 22 = 720p mp4)
+                if itag in ("18", "22") or ("video" in mime and fmt.get("audioQuality")):
+                    score = (1000 if itag == "22" else 800 if itag == "18" else height) + (bitrate // 1000)
+                    if score > best_video_score:
+                        best_video_score = score
+                        best_video_url = f_url
+                        best_video_fmt = fmt
+
+                # صيغ الصوت النقية (تفضيل itag 140 m4a ثم 251 opus ثم الأعلى جودة)
+                if "audio" in mime:
+                    score = (
+                        2000 if itag == "140"
+                        else 1800 if itag == "251"
+                        else 1500 if "mp4a" in mime
+                        else 1000
+                    ) + (bitrate // 1000)
+                    if score > best_audio_score:
+                        best_audio_score = score
+                        best_audio_url = f_url
+                        best_audio_fmt = fmt
+
+            hls_url = sd.get("hlsManifestUrl")
+            if is_live and hls_url:
+                best_video_url = best_video_url or hls_url
+                best_audio_url = best_audio_url or hls_url
+
+            if not best_audio_url and best_video_url:
+                best_audio_url = best_video_url
+                best_audio_fmt = best_video_fmt
+            if not best_video_url and hls_url:
+                best_video_url = hls_url
+
+            thumb_url = f"https://i.ytimg.com/vi/{v_id}/hqdefault.jpg"
+            ua_headers = self.get_stream_headers(best_audio_url or best_video_url or "")
+
+            if best_audio_url:
+                self._url_cache[f"{v_id}:a"] = (best_audio_url, now + self._cache_ttl)
+                a_clen = int(best_audio_fmt.get("contentLength") or 0)
+                if not a_clen and "clen=" in best_audio_url:
+                    try:
+                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(best_audio_url).query)
+                        a_clen = int(qs.get("clen", [0])[0])
+                    except Exception:
+                        a_clen = 0
+                a_mime = str(best_audio_fmt.get("mimeType", ""))
+                a_ext = "m4a" if ("mp4" in a_mime or str(best_audio_fmt.get("itag")) == "140") else "webm"
+                self._stream_info_cache[f"{v_id}:a"] = (
+                    {
+                        "vidid": v_id,
+                        "title": title,
+                        "duration_sec": secs,
+                        "duration_min": duration_min,
+                        "thumbnail": thumb_url,
+                        "direct_url": best_audio_url,
+                        "filesize": a_clen,
+                        "vcodec": "none" if "audio" in a_mime else "avc1",
+                        "ext": a_ext,
+                        "headers": ua_headers,
+                        "can_direct_pump": bool(a_clen > 0 and "m3u8" not in best_audio_url),
+                    },
+                    now + self._cache_ttl,
+                )
+
+            if best_video_url:
+                self._url_cache[f"{v_id}:v"] = (best_video_url, now + self._cache_ttl)
+                v_clen = int(best_video_fmt.get("contentLength") or 0)
+                if not v_clen and "clen=" in best_video_url:
+                    try:
+                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(best_video_url).query)
+                        v_clen = int(qs.get("clen", [0])[0])
+                    except Exception:
+                        v_clen = 0
+                self._stream_info_cache[f"{v_id}:v"] = (
+                    {
+                        "vidid": v_id,
+                        "title": title,
+                        "duration_sec": secs,
+                        "duration_min": duration_min,
+                        "thumbnail": thumb_url,
+                        "direct_url": best_video_url,
+                        "filesize": v_clen,
+                        "vcodec": "avc1",
+                        "ext": "mp4",
+                        "headers": ua_headers,
+                        "can_direct_pump": bool(v_clen > 0 and "m3u8" not in best_video_url),
+                    },
+                    now + self._cache_ttl,
+                )
 
             info = {
                 "title": title,
                 "link": f"{self.base}{v_id}",
                 "vidid": v_id,
                 "duration_min": duration_min,
-                "thumb": f"https://i.ytimg.com/vi/{v_id}/hqdefault.jpg",
+                "duration_sec": secs,
+                "thumb": thumb_url,
+                "views": views_str,
+                "channel": channel_name,
             }
             self._meta_cache[v_id] = (info, now + self._cache_ttl)
+            fut.set_result(info)
             return info
         except Exception as e:
             log.debug(f"Innertube player fast lookup error: {e}")
+            if not fut.done():
+                fut.set_result(None)
             return None
+        finally:
+            self._inflight_player.pop(vid, None)
 
-    async def _innertube_search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        """بحث يوتيوب مباشر عبر IPv4 في 100ms بدون مكتبة youtubesearchpython المعطلة"""
+    async def _innertube_search(self, query: str, limit: int = 10, prefetch_first: bool = True) -> list[dict[str, Any]]:
+        """بحث يوتيوب مباشر عبر IPv4 + orjson في 80ms مع استباق جلب الرابط المباشر للأغنية الأولى"""
         payload = {
             "context": {
                 "client": {
@@ -218,11 +495,11 @@ class YouTubeAPI:
                 }
             },
             "query": query,
-            "params": "EgIQAfABAQ==",  # فلتر الفيديوهات فقط
+            "params": "EgIQAfABAQ==",
         }
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "User-Agent": WEB_CHROME_UA,
             "X-YouTube-Client-Name": "1",
             "X-YouTube-Client-Version": "2.20260708.00.00",
             "Origin": "https://www.youtube.com",
@@ -231,12 +508,13 @@ class YouTubeAPI:
             session = await self._get_session()
             async with session.post(
                 "https://www.youtube.com/youtubei/v1/search?prettyPrint=false",
-                json=payload,
+                data=_json_dumps(payload),
                 headers=headers,
             ) as resp:
                 if resp.status != 200:
                     return []
-                data = await resp.json()
+                raw_bytes = await resp.read()
+                data = _json_loads(raw_bytes)
 
             results = []
             sections = (
@@ -260,11 +538,25 @@ class YouTubeAPI:
                     title = "".join(r.get("text", "") for r in title_runs) or "Unknown"
                     dur_text = (
                         vr.get("lengthText", {}).get("simpleText")
-                        or vr.get("lengthText", {}).get("accessibility", {})
+                        or vr.get("lengthText", {})
+                        .get("accessibility", {})
                         .get("accessibilityData", {})
                         .get("label")
                         or "Live"
                     )
+                    views_text = (
+                        vr.get("shortViewCountText", {}).get("simpleText")
+                        or vr.get("viewCountText", {}).get("simpleText")
+                        or "YouTube"
+                    )
+                    channel_runs = (
+                        vr.get("ownerText", {}).get("runs")
+                        or vr.get("longBylineText", {}).get("runs")
+                        or []
+                    )
+                    channel_name = channel_runs[0].get("text", "YouTube") if channel_runs else "YouTube"
+                    published_text = vr.get("publishedTimeText", {}).get("simpleText") or ""
+
                     thumb = f"https://i.ytimg.com/vi/{v_id}/hqdefault.jpg"
                     entry = {
                         "title": title,
@@ -274,15 +566,53 @@ class YouTubeAPI:
                         "duration": dur_text,
                         "duration_min": dur_text,
                         "thumb": thumb,
+                        "views": views_text,
+                        "channel": channel_name,
+                        "published": published_text,
                     }
                     self._meta_cache[v_id] = (entry, now + self._cache_ttl)
                     results.append(entry)
                     if len(results) >= limit:
-                        return results
+                        break
+                if len(results) >= limit:
+                    break
+
+            # 🚀 الدمج الاستباقي (Pre-warm): تجهيز الرابط المباشر لأول نتيجة في الخلفية فوراً!
+            if prefetch_first and results:
+                first_vid = results[0]["vidid"]
+                if f"{first_vid}:a" not in self._url_cache:
+                    asyncio.create_task(self._innertube_player(first_vid))
+
             return results
         except Exception as e:
             log.error(f"Fast Innertube Search error: {e}")
             return []
+
+    async def extract_fast_stream_info(self, query_or_link: str, is_video: bool = False) -> dict[str, Any] | None:
+        """
+        دالة مدمجة لمحرك SongDownloader (أمر يوت / ابعتلي):
+        تستخرج الرابط المباشر + الحجم بالبايت + التفاصيل عبر Innertube في ~80ms بدون تشغيل yt-dlp!
+        """
+        s = query_or_link.strip()
+        vid = self._extract_vid(s, s)
+        if len(vid) != 11:
+            results = await self._innertube_search(s, limit=1, prefetch_first=False)
+            if not results:
+                return None
+            vid = results[0]["vidid"]
+
+        suffix = "v" if is_video else "a"
+        cache_key = f"{vid}:{suffix}"
+        now = time.time()
+        cached = self._stream_info_cache.get(cache_key)
+        if cached and cached[1] > now:
+            return cached[0]
+
+        await self._innertube_player(vid)
+        cached = self._stream_info_cache.get(cache_key)
+        if cached and cached[1] > now:
+            return cached[0]
+        return None
 
     async def valid(self, url: str) -> bool:
         if not url or not isinstance(url, str):
@@ -328,15 +658,15 @@ class YouTubeAPI:
     async def track(self, link: str, videoid: str | bool | None = None) -> tuple[dict[str, Any], str]:
         vid = self._extract_vid(link, videoid)
 
-        # 1. إذا كان لدينا ID الفيديو (11 حرفاً)، نجلبه في 80ms عبر Innertube Player مباشرة
+        # 1. إذا كان لدينا ID الفيديو (11 حرفاً)، نجلبه مع الرابط المباشر في طلب واحد (~75ms)
         if len(vid) == 11:
             info = await self._innertube_player(vid)
             if info:
                 return info, vid
 
-        # 2. البحث المباشر السريع عبر IPv4
+        # 2. البحث المباشر السريع عبر IPv4 (مع إطلاق استباق الرابط المباشر في الخلفية)
         query = vid if len(vid) == 11 else str(link).strip()
-        results = await self._innertube_search(query, limit=1)
+        results = await self._innertube_search(query, limit=1, prefetch_first=True)
         if results:
             first = results[0]
             v_id = first["vidid"]
@@ -346,6 +676,8 @@ class YouTubeAPI:
                 "vidid": v_id,
                 "duration_min": first["duration_min"],
                 "thumb": first["thumb"],
+                "views": first.get("views", "YouTube"),
+                "channel": first.get("channel", "YouTube"),
             }, v_id
 
         return {"title": "Unknown", "duration_min": "0:00", "thumb": "", "vidid": vid, "link": link}, vid
@@ -354,15 +686,27 @@ class YouTubeAPI:
         data, vid = await self.track(link, videoid)
         dur = data.get("duration_min") or "0:00"
 
-        secs = 0
-        try:
-            parts = [int(p) for p in str(dur).split(":") if str(p).isdigit()]
-            if parts:
-                secs = sum(p * (60**i) for i, p in enumerate(reversed(parts)))
-        except Exception as e:
-            log.error(f"Duration parsing error: {e}")
+        secs = int(data.get("duration_sec") or 0)
+        if not secs:
+            try:
+                parts = [int(p) for p in str(dur).split(":") if str(p).isdigit()]
+                if parts:
+                    secs = sum(p * (60**i) for i, p in enumerate(reversed(parts)))
+            except Exception as e:
+                log.error(f"Duration parsing error: {e}")
 
         return data.get("title", "Unknown"), str(dur), secs, data.get("thumb", ""), str(vid)
+
+    async def get_cached_meta(self, vid: str) -> dict[str, Any] | None:
+        """استرجاع سريع لبيانات الفيديو من الكاش أو Innertube لتوليد الصور المصغرة فوراً"""
+        vid = self._extract_vid(vid, vid)
+        if not vid:
+            return None
+        now = time.time()
+        cached = self._meta_cache.get(vid)
+        if cached and cached[1] > now:
+            return cached[0]
+        return await self._innertube_player(vid)
 
     async def slider(
         self,
@@ -374,20 +718,28 @@ class YouTubeAPI:
             link = self.base + str(link)
         if "&" in link:
             link = link.split("&")[0]
-        results = await self._innertube_search(link, limit=10)
+        results = await self._innertube_search(link, limit=10, prefetch_first=False)
         if not results:
             return "Unknown", "0:00", "", ""
         idx = query_type if 0 <= query_type < len(results) else 0
         item = results[idx]
+        # استباق جلب الرابط المباشر للعنصر المعروض على السلايدر
+        if item.get("vidid"):
+            asyncio.create_task(self._innertube_player(item["vidid"]))
         return item["title"], str(item["duration_min"]), item["thumb"], item["vidid"]
 
     async def search(self, query: str, limit: int = 10) -> list[dict[str, str]]:
-        results = await self._innertube_search(query, limit=limit)
+        results = await self._innertube_search(query, limit=limit, prefetch_first=True)
         return [
             {
                 "title": d.get("title", "Unknown"),
                 "vidid": d.get("vidid", ""),
                 "duration": d.get("duration") or "0:00",
+                "thumb": d.get("thumb", ""),
+                "views": d.get("views", "YouTube"),
+                "channel": d.get("channel", "YouTube"),
+                "published": d.get("published", ""),
+                "link": d.get("link", ""),
             }
             for d in results
         ]
@@ -418,7 +770,10 @@ class YouTubeAPI:
         try:
             info = await self._extract_native(link, opts)
             entries = info.get("entries", []) if info else []
-            return [entry["id"] for entry in entries if entry and entry.get("id")][:limit]
+            ids = [entry["id"] for entry in entries if entry and entry.get("id")][:limit]
+            if ids:
+                asyncio.create_task(self._innertube_player(ids[0]))
+            return ids
         except Exception as e:
             log.error(f"Playlist extraction error: {e}")
             return []
@@ -450,7 +805,7 @@ class YouTubeAPI:
         if cached and cached[1] > now:
             return (cached[0], True) if wants_tuple else cached[0]
 
-        # محاولة سريعة جداً عبر Innertube Player (80ms)
+        # 1. مسار Innertube الفوري المدمج (~75ms أو انتظار الـ Future الجارية من البحث)
         if len(vid) == 11:
             await self._innertube_player(vid)
             cached = self._url_cache.get(cache_key)
@@ -461,12 +816,13 @@ class YouTubeAPI:
             str(format_id)
             if format_id
             else (
-                "best[ext=mp4][height<=720]/best[height<=720]/best"
+                "18/22/best[ext=mp4][height<=720]/best[height<=720]/best"
                 if is_video
-                else "bestaudio[ext=m4a]/bestaudio/best"
+                else "140/251/bestaudio[ext=m4a]/bestaudio/best"
             )
         )
 
+        # 2. مسار yt-dlp السريع (visionos + tv_samsung بدون JS)
         opts = {**self.fast_opts, "format": media_format}
         try:
             info = await self._extract_native(target_url, opts)
@@ -477,7 +833,12 @@ class YouTubeAPI:
         except Exception as e:
             log.debug(f"Fast extraction fallback triggered for {target_url}: {e}")
 
-        fb_opts = {**self.fallback_opts, "format": media_format}
+        # 3. مسار yt-dlp الاحتياطي (tv_samsung + tv_downgraded + web_embedded مع الكوكيز)
+        fb_opts = {
+            **self.fallback_opts,
+            "cookiefile": _get_valid_cookiefile(),
+            "format": media_format,
+        }
         try:
             info = await self._extract_native(target_url, fb_opts)
             direct_url = info.get("url") if info else None
