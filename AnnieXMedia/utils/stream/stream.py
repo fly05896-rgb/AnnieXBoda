@@ -1,6 +1,5 @@
 # Authored By Certified Coders © 2026
-# System: Stream Controller (Logic & Queue Bridge)
-# Updated: Python 3.14 Native, 10-Core Fly.io API Compatible, PEP 604
+# System: Stream Controller (Logic & Parallel Queue Bridge)
 
 import asyncio
 import contextlib
@@ -15,15 +14,15 @@ from AnnieXMedia.core.call import StreamController
 from AnnieXMedia.misc import db
 from AnnieXMedia.utils.database import (
     add_active_video_chat,
-    remove_active_video_chat,
     is_active_chat,
+    remove_active_video_chat,
 )
+from AnnieXMedia.utils.errors import capture_internal_err
 from AnnieXMedia.utils.exceptions import AssistantErr
 from AnnieXMedia.utils.inline import aq_markup, close_markup, stream_markup
 from AnnieXMedia.utils.inline.custom import custom_markup
 from AnnieXMedia.utils.pastebin import ANNIEBIN
 from AnnieXMedia.utils.stream.queue import put_queue, put_queue_index
-from AnnieXMedia.utils.errors import capture_internal_err
 
 
 async def safe_delete(message) -> None:
@@ -56,7 +55,6 @@ async def stream(
     spotify: bool | str | None = None,
     forceplay: bool | str | None = None,
 ) -> None:
-    
     if not result:
         return
 
@@ -69,23 +67,17 @@ async def stream(
     def get_download_id(vid: str) -> str:
         return f"{vid}_v" if is_video else str(vid)
 
-    # ==========================
-    # Structural Pattern Matching (Python 3.10+ / Highly Optimized in 3.13+)
-    # ==========================
     match streamtype:
-        
         # --------------------------
         # 1. CUSTOM MODE (Inline File Playback)
         # --------------------------
         case "custom":
-            link = result.get("link", "")
             vidid = result.get("vidid", "")
             title = result.get("title", "").title()
             duration_min = result.get("duration_min", "00:00")
 
             is_active = await is_active_chat(chat_id)
 
-            # 🔴 التحديث: إضافة احترام الطابور (Queue) لوضع الملفات المرفوعة
             if is_active and not forceplay:
                 await put_queue(
                     chat_id,
@@ -118,7 +110,6 @@ async def stream(
                 db[chat_id] = []
 
             try:
-                # 🚀 استلام قيمة واحدة (رابط مباشر) من سيرفر Fly.io
                 file_path = await YouTube.download(
                     vidid, None, video=is_video, videoid=get_download_id(vidid)
                 )
@@ -167,34 +158,103 @@ async def stream(
             return
 
         # --------------------------
-        # 2. PLAYLIST MODE
+        # 2. PLAYLIST MODE (Parallel Batch Details + Instant First Track Play)
         # --------------------------
         case "playlist":
             msg = f"{_['play_19']}\n\n"
             count = 0
-            
-            # 🔴 التحديث: منع تكرار تفريغ الطابور أثناء تحميل القائمة لمعالجة ثغرة الـ Race Condition
+
             is_active = await is_active_chat(chat_id)
             if not is_active and not forceplay:
                 db[chat_id] = []
 
-            for search in result:
-                if count == config.PLAYLIST_FETCH_LIMIT:
-                    break
+            items = list(result)[: config.PLAYLIST_FETCH_LIMIT]
+            if not items:
+                return
 
-                try:
-                    title, duration_min, duration_sec, thumbnail, vidid = await YouTube.details(search, videoid=search)
-                except Exception as e:
-                    print(f"\n🚨 [PLAYLIST MODE] Fetch Details Error: {type(e).__name__}")
-                    traceback.print_exc()
-                    continue
+            sem = asyncio.Semaphore(10)
 
-                if str(duration_min) == "None" or duration_min is None:
-                    continue
-                if duration_sec and duration_sec > config.DURATION_LIMIT:
-                    continue
+            async def _fetch_item_details(item: str):
+                async with sem:
+                    try:
+                        return await YouTube.details(item, videoid=item)
+                    except Exception:
+                        return None
 
-                if await is_active_chat(chat_id):
+            # 🚀 إذا لم يكن هناك بث نشط، نشغل أول أغنية صالحة فوراً بينما تُجلب باقي القائمة بالتوازي!
+            remaining_items = items
+            if not is_active:
+                first_idx = -1
+                for idx, item in enumerate(items):
+                    det = await _fetch_item_details(item)
+                    if not det:
+                        continue
+                    title, duration_min, duration_sec, thumbnail, vidid = det
+                    if not vidid or str(duration_min) == "None" or (duration_sec and duration_sec > config.DURATION_LIMIT):
+                        continue
+                    try:
+                        file_path = await YouTube.download(
+                            vidid, mystic, video=is_video, videoid=get_download_id(vidid)
+                        )
+                        if not file_path:
+                            continue
+                        await StreamController.join_call(chat_id, original_chat_id, file_path, video=is_video)
+                        await put_queue(
+                            chat_id,
+                            original_chat_id,
+                            file_path,
+                            title,
+                            duration_min,
+                            user_name,
+                            vidid,
+                            user_id,
+                            "video" if is_video else "audio",
+                            forceplay=True,
+                        )
+                        img = f"https://i.ytimg.com/vi/{vidid}/hqdefault.jpg" if vidid else config.YOUTUBE_IMG_URL
+                        button = stream_markup(_, chat_id)
+                        await safe_delete(mystic)
+
+                        run = await app.send_photo(
+                            original_chat_id,
+                            photo=img,
+                            caption=_["stream_1"].format(
+                                f"https://t.me/{app.username}?start=info_{vidid}",
+                                title[:23],
+                                duration_min,
+                                user_name,
+                            ),
+                            reply_markup=InlineKeyboardMarkup(button),
+                        )
+                        if db.get(chat_id):
+                            db[chat_id][0]["mystic"] = run
+                            db[chat_id][0]["markup"] = "stream"
+
+                        count += 1
+                        first_idx = idx
+                        break
+                    except Exception as e:
+                        print(f"\n🚨 [PLAYLIST MODE] Download/Join Error: {type(e).__name__}")
+                        traceback.print_exc()
+                        continue
+
+                if first_idx >= 0:
+                    remaining_items = items[first_idx + 1 :]
+                else:
+                    return
+
+            # 🚀 جلب تفاصيل باقي الأغاني في القائمة بالتوازي (Parallel Batch) بدلاً من الانتظار المتتالي
+            if remaining_items:
+                fetched_list = await asyncio.gather(*[_fetch_item_details(it) for it in remaining_items])
+                for det in fetched_list:
+                    if not det:
+                        continue
+                    title, duration_min, duration_sec, thumbnail, vidid = det
+                    if not vidid or str(duration_min) == "None" or duration_min is None:
+                        continue
+                    if duration_sec and duration_sec > config.DURATION_LIMIT:
+                        continue
+
                     await put_queue(
                         chat_id,
                         original_chat_id,
@@ -209,55 +269,6 @@ async def stream(
                     position = len(db.get(chat_id)) - 1
                     count += 1
                     msg += f"{count}. {title[:70]}\n{_['play_20']} {position}\n\n"
-                    continue
-
-                try:
-                    # 🚀 استلام قيمة واحدة للرابط المباشر في قوائم التشغيل
-                    file_path = await YouTube.download(
-                        vidid, mystic, video=is_video, videoid=get_download_id(vidid)
-                    )
-                    direct = True
-                    if not file_path:
-                        continue
-                    await StreamController.join_call(chat_id, original_chat_id, file_path, video=is_video)
-                except Exception as e:
-                    print(f"\n🚨 [PLAYLIST MODE] Download/Join Error: {type(e).__name__}")
-                    traceback.print_exc()
-                    continue
-
-                await put_queue(
-                    chat_id,
-                    original_chat_id,
-                    file_path if direct else f"vid_{vidid}",
-                    title,
-                    duration_min,
-                    user_name,
-                    vidid,
-                    user_id,
-                    "video" if is_video else "audio",
-                    forceplay=True,
-                )
-
-                img = f"https://i.ytimg.com/vi/{vidid}/hqdefault.jpg" if vidid else config.YOUTUBE_IMG_URL
-                button = stream_markup(_, chat_id)
-                await safe_delete(mystic)
-
-                run = await app.send_photo(
-                    original_chat_id,
-                    photo=img,
-                    caption=_["stream_1"].format(
-                        f"https://t.me/{app.username}?start=info_{vidid}",
-                        title[:23],
-                        duration_min,
-                        user_name,
-                    ),
-                    reply_markup=InlineKeyboardMarkup(button),
-                )
-                if db.get(chat_id):
-                    db[chat_id][0]["mystic"] = run
-                    db[chat_id][0]["markup"] = "stream"
-
-                count += 1
 
             if count == 0:
                 return
@@ -269,7 +280,7 @@ async def stream(
                 playlist_photo = config.PLAYLIST_IMG_URL
 
             upl = close_markup(_)
-            final_position = len(db.get(chat_id) or []) - 1
+            final_position = max(0, len(db.get(chat_id) or []) - 1)
             return await app.send_photo(
                 original_chat_id,
                 photo=playlist_photo,
@@ -281,8 +292,8 @@ async def stream(
         # 3. UNIFIED MEDIA MODE (YT, SC, TG, LIVE, INDEX)
         # --------------------------
         case _:
-            is_index = (streamtype == "index")
-            is_live = (streamtype == "live")
+            is_index = streamtype == "index"
+            is_live = streamtype == "live"
 
             if is_index:
                 link = file_path = vidid = result
@@ -295,7 +306,6 @@ async def stream(
                 duration_min = "Live Track" if is_live else result.get("duration_min", result.get("dur", "00:00"))
                 file_path = result.get("path", result.get("filepath", ""))
 
-            # Path determination based on streamtype
             match streamtype:
                 case "youtube":
                     q_path = f"vid_{vidid}"
@@ -367,21 +377,15 @@ async def stream(
             try:
                 match streamtype:
                     case "youtube":
-                        # 🚀 استلام الرابط المباشر فقط من السيرفر الصاروخي
                         play_path = await YouTube.download(
                             vidid, mystic, video=is_video, videoid=get_download_id(vidid)
                         )
-                        direct = True
                     case "live":
-                        n, play_path = await YouTube.video(link)
-                        direct = True
+                        n, play_path = await YouTube.video(link, videoid=vidid)
                         if n == 0:
                             raise AssistantErr(_["str_3"])
                     case "index":
                         play_path = link
-                        direct = True
-                    case _:
-                        direct = False
 
                 if not play_path:
                     raise AssistantErr(_["play_14"])
@@ -429,7 +433,7 @@ async def stream(
 
             match streamtype:
                 case "soundcloud":
-                    photo = config.SOUNDCLOUD_IMG_URL
+                    photo = config.SOUNCLOUD_IMG_URL
                     caption = _["stream_1"].format(config.SUPPORT_CHAT, title[:23], duration_min, user_name)
                 case "telegram":
                     photo = config.TELEGRAM_VIDEO_URL if is_video else config.TELEGRAM_AUDIO_URL
@@ -455,4 +459,6 @@ async def stream(
 
             if db.get(chat_id):
                 db[chat_id][0]["mystic"] = run
-                db[chat_id][0]["markup"] = "tg" if streamtype in ["soundcloud", "telegram", "live", "index"] else "stream"
+                db[chat_id][0]["markup"] = (
+                    "tg" if streamtype in ["soundcloud", "telegram", "live", "index"] else "stream"
+                )
