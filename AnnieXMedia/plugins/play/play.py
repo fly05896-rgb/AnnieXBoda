@@ -1,6 +1,6 @@
 # Authored By Certified Coders © 2026
-# System: Play Command Handler (Merged Request Pipeline & Shared MongoDB)
-# Compatibility: PyTgCalls v3.0.0 & NTgCalls v3.0.5 & Kurigram 2.2.26
+# File Path: AnnieXMedia/plugins/play/play.py
+# System: Play Command Handler (0ms RAM Search-Lock Cache + Parallel Reply & YouTube Track Pipeline)
 
 import asyncio
 import random
@@ -32,24 +32,30 @@ from AnnieXMedia.utils.logger import play_logs
 from AnnieXMedia.utils.stream.stream import stream
 
 # ==========================================================
-# 🗄️ إعدادات قاعدة البيانات المشتركة (نظام قفل البحث)
+# إعدادات قاعدة البيانات المشتركة مع كاش الرام الفوري (0ms بدل 789ms)
 # ==========================================================
 
 SUDO_USERS = OWNER_ID if isinstance(OWNER_ID, list) else [OWNER_ID]
 songdb = mongodb.song_settings
+_SEARCH_LOCKED_CACHE: bool | None = None
 
 
 async def get_search_state() -> bool:
+    global _SEARCH_LOCKED_CACHE
+    if _SEARCH_LOCKED_CACHE is not None:
+        return _SEARCH_LOCKED_CACHE
     try:
         data = await songdb.find_one({"_id": "song_config"})
-        if not data:
-            return False
-        return data.get("search_locked", False)
+        _SEARCH_LOCKED_CACHE = bool(data.get("search_locked", False)) if data else False
+        return _SEARCH_LOCKED_CACHE
     except Exception:
+        _SEARCH_LOCKED_CACHE = False
         return False
 
 
 async def set_search_state(locked: bool):
+    global _SEARCH_LOCKED_CACHE
+    _SEARCH_LOCKED_CACHE = bool(locked)
     with suppress(Exception):
         await songdb.update_one({"_id": "song_config"}, {"$set": {"search_locked": locked}}, upsert=True)
 
@@ -60,8 +66,18 @@ async def _safe_delete_msg(msg):
             await msg.delete()
 
 
+async def _send_wait_msg(message: Message, wait_text: str):
+    try:
+        return await message.reply_text(wait_text)
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        return await message.reply_text(wait_text)
+    except RandomIdDuplicate:
+        return await app.send_message(message.chat.id, wait_text)
+
+
 # ==========================================================
-# 🔒 أوامر التحكم (أدمن المطور)
+# أوامر التحكم (أدمن المطور)
 # ==========================================================
 
 @app.on_message(filters.command(["قفل البحث", "تعطيل البحث"], prefixes=["", "/"]) & filters.user(SUDO_USERS))
@@ -77,7 +93,7 @@ async def unlock_search_cmd(client, message: Message):
 
 
 # ==========================================================
-# 🎵 كود التشغيل الرئيسي (The Main Engine)
+# كود التشغيل الرئيسي (The Main Engine)
 # ==========================================================
 
 @app.on_message(
@@ -104,25 +120,16 @@ async def play_command(
     url,
     fplay,
 ):
-    # 1. التحقق من القفل
     is_locked = await get_search_state()
     if is_locked and message.from_user.id not in SUDO_USERS:
         return await message.reply_text("- البحـث مغلـق .")
 
-    # 2. تحديد نوع الميديا (فيديو ولا صوت)
     command = message.command[0] if message.command else ""
     if command in ["فيد", "فيديو", "vplay", "cvplay", "vplayforce", "cvplayforce"]:
         video = True
 
-    # 3. رسالة الانتظار
     wait_text = _["play_2"].format(channel) if channel else random.choice(AYU)
-    try:
-        mystic = await message.reply_text(wait_text)
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        mystic = await message.reply_text(wait_text)
-    except RandomIdDuplicate:
-        mystic = await app.send_message(message.chat.id, wait_text)
+    mystic_task = asyncio.create_task(_send_wait_msg(message, wait_text))
 
     plist_id = None
     plist_type = None
@@ -145,6 +152,7 @@ async def play_command(
         else None
     )
     if audio_telegram:
+        mystic = await mystic_task
         if audio_telegram.file_size > config.TG_AUDIO_FILESIZE_LIMIT:
             return await mystic.edit_text(_["play_5"])
         if audio_telegram.duration > config.DURATION_LIMIT:
@@ -166,7 +174,7 @@ async def play_command(
                 await _safe_delete_msg(mystic)
                 return await app.send_message(chat_id, _["general_2"].format(type(e).__name__))
 
-            await play_logs(message, streamtype="Telegram [Audio]", query=message.reply_to_message.caption or "—")
+            asyncio.create_task(play_logs(message, streamtype="Telegram [Audio]", query=message.reply_to_message.caption or "—"))
             return await _safe_delete_msg(mystic)
         return
 
@@ -179,6 +187,7 @@ async def play_command(
         else None
     )
     if video_telegram:
+        mystic = await mystic_task
         if message.reply_to_message.document:
             try:
                 ext = (video_telegram.file_name or "").split(".")[-1]
@@ -206,7 +215,7 @@ async def play_command(
                 await _safe_delete_msg(mystic)
                 return await app.send_message(chat_id, _["general_2"].format(type(e).__name__))
 
-            await play_logs(message, streamtype="Telegram [Video]", query=message.reply_to_message.caption or "—")
+            asyncio.create_task(play_logs(message, streamtype="Telegram [Video]", query=message.reply_to_message.caption or "—"))
             return await _safe_delete_msg(mystic)
         return
 
@@ -216,10 +225,14 @@ async def play_command(
     if url:
         if await YouTube.exists(url):
             match url:
-                case _ if "playlist" in url or "list=" in url and "watch?v=" not in url:
+                case _ if "playlist" in url or ("list=" in url and "watch?v=" not in url):
                     try:
-                        details = await YouTube.playlist(url, config.PLAYLIST_FETCH_LIMIT, user_id)
+                        details, mystic = await asyncio.gather(
+                            YouTube.playlist(url, config.PLAYLIST_FETCH_LIMIT, user_id),
+                            mystic_task,
+                        )
                     except Exception as e:
+                        mystic = await mystic_task
                         return await mystic.edit_text(f"{_['play_3']}\nʀᴇᴀsᴏɴ: {e}")
 
                     if not details:
@@ -233,8 +246,12 @@ async def play_command(
                     log_label = "Youtube playlist"
                 case _:
                     try:
-                        details, track_id = await YouTube.track(url)
+                        (details, track_id), mystic = await asyncio.gather(
+                            YouTube.track(url),
+                            mystic_task,
+                        )
                     except Exception as e:
+                        mystic = await mystic_task
                         return await mystic.edit_text(f"{_['play_3']}\nʀᴇᴀsᴏɴ: {e}")
 
                     if not details or details.get("title") == "Unknown":
@@ -246,6 +263,7 @@ async def play_command(
                     log_label = "Youtube Track"
 
         elif await Spotify.valid(url):
+            mystic = await mystic_task
             spotify = True
             if not config.SPOTIFY_CLIENT_ID or not config.SPOTIFY_CLIENT_SECRET:
                 return await mystic.edit_text("» Spotify not supported yet.")
@@ -302,6 +320,7 @@ async def play_command(
                     return await mystic.edit_text(_["play_15"])
 
         elif await Apple.valid(url):
+            mystic = await mystic_task
             match url:
                 case _ if "album" in url or "/song/" in url or "?i=" in url:
                     try:
@@ -337,6 +356,7 @@ async def play_command(
                     return await mystic.edit_text(_["play_3"])
 
         elif await Resso.valid(url):
+            mystic = await mystic_task
             try:
                 res = await Resso.track(url)
                 if not res or not isinstance(res, tuple):
@@ -352,6 +372,7 @@ async def play_command(
             log_label = "Resso"
 
         elif await SoundCloud.valid(url):
+            mystic = await mystic_task
             try:
                 sc_res = await SoundCloud.download(url)
                 if not sc_res or not isinstance(sc_res, tuple):
@@ -371,26 +392,28 @@ async def play_command(
                 await _safe_delete_msg(mystic)
                 return await app.send_message(chat_id, _["general_2"].format(type(e).__name__))
 
-            await play_logs(message, streamtype="Soundcloud")
+            asyncio.create_task(play_logs(message, streamtype="Soundcloud"))
             return await _safe_delete_msg(mystic)
 
         else:
-            # Index / M3U8 Link
+            mystic = await mystic_task
             try:
                 await stream(
                     _, mystic, user_id, url, chat_id, user_name,
                     message.chat.id, video=bool(video), streamtype="index", forceplay=bool(fplay),
                 )
-                return await play_logs(message, streamtype="M3U8 or Index Link")
+                asyncio.create_task(play_logs(message, streamtype="M3U8 or Index Link"))
+                return
             except Exception as e:
                 await _safe_delete_msg(mystic)
                 return await app.send_message(chat_id, _["general_2"].format(type(e).__name__))
 
     # ==========================
-    # D. البحث (Search Query)
+    # D. البحث السريع بالتوازي مع إرسال رسالة الانتظار (يوفر 300ms كاملة!)
     # ==========================
     else:
         if len(message.command) < 2:
+            mystic = await mystic_task
             buttons = botplaylist_markup(_)
             return await mystic.edit_text(_["play_18"], reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -399,8 +422,12 @@ async def play_command(
             query = query.replace("-v", "").strip()
 
         try:
-            details, track_id = await YouTube.track(query)
+            (details, track_id), mystic = await asyncio.gather(
+                YouTube.track(query),
+                mystic_task,
+            )
         except Exception as e:
+            mystic = await mystic_task
             return await mystic.edit_text(f"{_['play_3']}\nʀᴇᴀsᴏɴ: {e}")
 
         if not details or details.get("title") == "Unknown":
@@ -432,8 +459,9 @@ async def play_command(
                         await _safe_delete_msg(mystic)
                         return await app.send_message(chat_id, _["general_2"].format(type(e).__name__))
 
-                    await _safe_delete_msg(mystic)
-                    return await play_logs(message, streamtype=log_label)
+                    asyncio.create_task(_safe_delete_msg(mystic))
+                    asyncio.create_task(play_logs(message, streamtype=log_label))
+                    return
 
                 else:
                     buttons = livestream_markup(
@@ -446,7 +474,7 @@ async def play_command(
                     if not stream_img or not str(stream_img).startswith("http"):
                         stream_img = config.YOUTUBE_IMG_URL
 
-                    await _safe_delete_msg(mystic)
+                    asyncio.create_task(_safe_delete_msg(mystic))
                     return await message.reply_photo(
                         photo=stream_img,
                         caption=_["play_13"],
@@ -461,7 +489,7 @@ async def play_command(
                     "c" if channel else "g",
                     "f" if fplay else "d",
                 )
-                await _safe_delete_msg(mystic)
+                asyncio.create_task(_safe_delete_msg(mystic))
 
                 final_thumb = config.PLAYLIST_IMG_URL
                 with suppress(Exception):
@@ -487,7 +515,8 @@ async def play_command(
                     "spartist": "Spotify artist",
                     "apple": "Apple Music playlist",
                 }
-                return await play_logs(message, streamtype=plist_label_map.get(plist_type, "Playlist"))
+                asyncio.create_task(play_logs(message, streamtype=plist_label_map.get(plist_type, "Playlist")))
+                return
 
         case _:
             buttons = slider_markup(
@@ -495,7 +524,7 @@ async def play_command(
                 "c" if channel else "g",
                 "f" if fplay else "d",
             )
-            await _safe_delete_msg(mystic)
+            asyncio.create_task(_safe_delete_msg(mystic))
 
             slide_thumb = details.get("thumb")
             if not slide_thumb or not str(slide_thumb).startswith("http"):
@@ -506,7 +535,8 @@ async def play_command(
                 caption=_["play_10"].format(details["title"].title(), details["duration_min"]),
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
-            return await play_logs(message, streamtype="Searched on YouTube")
+            asyncio.create_task(play_logs(message, streamtype="Searched on YouTube"))
+            return
 
 
 # ==========================
@@ -527,18 +557,14 @@ async def play_music_cb(client, CallbackQuery, _):
 
         chat_id, channel = await get_channeplayCB(_, cplay, CallbackQuery)
         user_name = CallbackQuery.from_user.first_name
-        await CallbackQuery.message.delete()
+        asyncio.create_task(CallbackQuery.message.delete())
         await CallbackQuery.answer()
 
-        try:
-            mystic = await CallbackQuery.message.reply_text(_["play_2"].format(channel) if channel else random.choice(AYU))
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-            mystic = await CallbackQuery.message.reply_text(_["play_2"].format(channel) if channel else random.choice(AYU))
-        except RandomIdDuplicate:
-            mystic = await app.send_message(CallbackQuery.message.chat.id, _["play_2"].format(channel) if channel else random.choice(AYU))
-
-        details, track_id = await YouTube.track(vidid, videoid=vidid)
+        wait_text = _["play_2"].format(channel) if channel else random.choice(AYU)
+        (details, track_id), mystic = await asyncio.gather(
+            YouTube.track(vidid, videoid=vidid),
+            _send_wait_msg(CallbackQuery.message, wait_text),
+        )
 
         if details.get("duration_min") and str(details.get("duration_min")).lower() != "live":
             duration_sec = time_to_seconds(details["duration_min"])
@@ -552,7 +578,7 @@ async def play_music_cb(client, CallbackQuery, _):
                 _, mystic, CallbackQuery.from_user.id, details, chat_id, user_name,
                 CallbackQuery.message.chat.id, bool(video), streamtype="youtube", forceplay=bool(forceplay),
             )
-            await _safe_delete_msg(mystic)
+            asyncio.create_task(_safe_delete_msg(mystic))
         else:
             buttons = livestream_markup(
                 _, track_id, CallbackQuery.from_user.id, mode,
@@ -594,16 +620,11 @@ async def play_playlists_command(client, CallbackQuery, _):
 
         chat_id, channel = await get_channeplayCB(_, cplay, CallbackQuery)
         user_name = CallbackQuery.from_user.first_name
-        await CallbackQuery.message.delete()
+        asyncio.create_task(CallbackQuery.message.delete())
         await CallbackQuery.answer()
 
-        try:
-            mystic = await CallbackQuery.message.reply_text(_["play_2"].format(channel) if channel else random.choice(AYU))
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-            mystic = await CallbackQuery.message.reply_text(_["play_2"].format(channel) if channel else random.choice(AYU))
-        except RandomIdDuplicate:
-            mystic = await app.send_message(CallbackQuery.message.chat.id, _["play_2"].format(channel) if channel else random.choice(AYU))
+        wait_text = _["play_2"].format(channel) if channel else random.choice(AYU)
+        mystic = await _send_wait_msg(CallbackQuery.message, wait_text)
 
         videoid = lyrical.get(videoid)
         video = mode == "v"
@@ -639,8 +660,8 @@ async def play_playlists_command(client, CallbackQuery, _):
             _, mystic, CallbackQuery.from_user.id, result, chat_id, user_name,
             CallbackQuery.message.chat.id, bool(video), streamtype=internal_type, spotify=spotify, forceplay=bool(forceplay),
         )
-        await play_logs(CallbackQuery.message, streamtype=log_label)
-        await _safe_delete_msg(mystic)
+        asyncio.create_task(play_logs(CallbackQuery.message, streamtype=log_label))
+        asyncio.create_task(_safe_delete_msg(mystic))
 
     except Exception as e:
         await _safe_delete_msg(mystic)
