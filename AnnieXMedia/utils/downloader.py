@@ -1,4 +1,6 @@
-# Authored By Certified Coders © 2025
+# Authored By Certified Coders © 2026
+# System: Downloader Utility (100% Cookie-Free + yt-dlp 2026.10.21 Optimized)
+
 import asyncio
 import contextlib
 import glob
@@ -12,10 +14,10 @@ from aiohttp import TCPConnector
 from yt_dlp import YoutubeDL
 
 from AnnieXMedia.core.dir import CACHE_DIR, DOWNLOAD_DIR
-from AnnieXMedia.utils.cookie_handler import COOKIE_PATH as _COOKIES_FILE
+from AnnieXMedia.logging import LOGGER
+from AnnieXMedia.platforms.Youtube import _SHARED_CODE_CACHE, _SHARED_PLAYER_CACHE, _SilentYTDLPLogger
 from AnnieXMedia.utils.tuning import CHUNK_SIZE, SEM
 from config import API_KEY, API_URL, VIDEO_API_URL
-from AnnieXMedia.logging import LOGGER
 
 LOGGER = LOGGER(__name__)
 
@@ -47,11 +49,6 @@ def extract_video_id(link: str) -> str:
 
 
 def get_cookie_file() -> Optional[str]:
-    try:
-        if _COOKIES_FILE and os.path.exists(_COOKIES_FILE) and os.path.getsize(_COOKIES_FILE) > 0:
-            return _COOKIES_FILE
-    except Exception:
-        pass
     return None
 
 
@@ -66,7 +63,7 @@ def find_cached_file(video_id: str) -> Optional[str]:
 
 
 def get_ytdlp_base_opts() -> Dict[str, object]:
-    opts = {
+    return {
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
         "quiet": True,
         "no_warnings": True,
@@ -74,18 +71,30 @@ def get_ytdlp_base_opts() -> Dict[str, object]:
         "overwrites": False,
         "continuedl": True,
         "noprogress": True,
+        "cookiefile": None,
+        "logger": _SilentYTDLPLogger(),
+        "force_ipv4": True,
+        "source_address": "0.0.0.0",
+        "nocheckcertificate": True,
         "concurrent_fragment_downloads": 16,
-        "http_chunk_size": 1 << 20,
-        "socket_timeout": 15,
-        "retries": 1,
-        "fragment_retries": 1,
+        "http_chunk_size": 10485760,
+        "socket_timeout": 10,
+        "retries": 2,
+        "fragment_retries": 2,
         "cachedir": str(CACHE_DIR),
         "ignoreerrors": True,
-        "merge_output_format": "mp4"
+        "merge_output_format": "mp4",
+        "js_runtimes": {"deno": {}, "node": {}},
+        "remote_components": ["ejs:github"],
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web_embedded", "tv_downgraded", "tv_samsung", "visionos", "android"],
+                "player_skip": ["webpage", "initial_data"],
+                "skip": ["hls", "dash", "translated_subs"],
+                "fetch_pot": ["never"],
+            }
+        },
     }
-    if cookiefile := get_cookie_file():
-        opts["cookiefile"] = cookiefile
-    return opts
 
 
 async def get_http_session() -> aiohttp.ClientSession:
@@ -206,6 +215,8 @@ def download_with_ytdlp_sync(link: str, fmt: str) -> Optional[str]:
         opts["format"] = fmt
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(link, download=False)
+            if not info:
+                return None
             if path := get_final_path_from_info(info):
                 return path
             ydl.download([link])
@@ -279,7 +290,12 @@ async def yt_dlp_download(link: str, type: str, title: str = "") -> Optional[str
         async def run():
             ytdlp_task = asyncio.create_task(
                 run_with_semaphore(
-                    loop.run_in_executor(None, download_with_ytdlp_sync, link, "bestaudio[ext=webm][acodec=opus]")
+                    loop.run_in_executor(
+                        None,
+                        download_with_ytdlp_sync,
+                        link,
+                        "140/251/bestaudio[ext=m4a]/bestaudio/18/best",
+                    )
                 )
             )
             api_task = asyncio.create_task(api_download_audio(link)) if USE_AUDIO_API else None
@@ -298,7 +314,12 @@ async def yt_dlp_download(link: str, type: str, title: str = "") -> Optional[str
         async def run():
             ytdlp_task = asyncio.create_task(
                 run_with_semaphore(
-                    loop.run_in_executor(None, download_with_ytdlp_sync, link, "(bestvideo[height<=?720][width<=?1280][ext=mp4])+(bestaudio)")
+                    loop.run_in_executor(
+                        None,
+                        download_with_ytdlp_sync,
+                        link,
+                        "18/22/(bestvideo[height<=?720][width<=?1280][ext=mp4])+(bestaudio)/best",
+                    )
                 )
             )
             api_task = asyncio.create_task(api_download_video(link)) if USE_VIDEO_API else None
