@@ -1,5 +1,5 @@
 # Authored By Certified Coders © 2026
-# System: SongDownloader Engine (Integrated with Innertube Fast Stream + yt-dlp 2026.10.21)
+# System: SongDownloader Engine (100% Cookie-Free + Innertube Fast Stream + yt-dlp 2026.10.21)
 
 import asyncio
 import logging
@@ -11,7 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import yt_dlp
 
-from AnnieXMedia.platforms.Youtube import YouTube, _SHARED_CODE_CACHE, _SHARED_PLAYER_CACHE
+from AnnieXMedia.platforms.Youtube import (
+    YouTube,
+    _SHARED_CODE_CACHE,
+    _SHARED_PLAYER_CACHE,
+    _SilentYTDLPLogger,
+)
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -80,9 +85,9 @@ class SongDownloaderAPI:
         self.force_high_quality = False
 
     def _build_ydl_opts(self, is_video: bool, is_playlist: bool = False, out_tmpl: str | None = None) -> dict:
-        # 🚀 متوافق مع yt-dlp 2026.10.21:
-        # استبدال android (المعطل والذي يطلب PO Token) بـ visionos و tv_samsung و tv_downgraded
-        target_clients = ["visionos", "tv_samsung", "tv_downgraded"]
+        # 🚀 متوافق 100% مع yt-dlp 2026.10.21 بدون أي كوكيز نهائياً:
+        # عدم وضع "js" في player_skip وعدم وضع "formats": ["missing_pot"]
+        target_clients = ["web_embedded", "tv_downgraded", "tv_samsung", "visionos", "android"]
         if is_video:
             if self.force_high_quality:
                 fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
@@ -91,27 +96,29 @@ class SongDownloaderAPI:
         else:
             fmt = "140/139/251/ba[ext=m4a]/ba/18/b"
 
+        yt_extractor_args = {
+            "player_client": target_clients,
+            "player_skip": ["webpage", "initial_data"],
+            "skip": ["hls", "dash", "translated_subs"],
+            "fetch_pot": ["never"],
+        }
+        if getattr(YouTube, "_visitor_data", None):
+            yt_extractor_args["visitor_data"] = [YouTube._visitor_data]
+
         opts = {
             "format": fmt,
             "quiet": True,
             "no_warnings": True,
             "nocheckcertificate": True,
             "cookiefile": None,
+            "logger": _SilentYTDLPLogger(),
             "cachedir": Config.CACHE_DIR,
             "force_ipv4": True,
             "source_address": "0.0.0.0",
             "geo_bypass": False,
-            "js_runtimes": {"node": {}, "deno": {}},
+            "js_runtimes": {"deno": {}, "node": {}},
             "remote_components": ["ejs:github"],
-            "extractor_args": {
-                "youtube": {
-                    "player_client": target_clients,
-                    "player_skip": ["webpage", "configs", "initial_data", "js"],
-                    "skip": ["hls", "dash", "translated_subs"],
-                    "formats": ["missing_pot"],
-                    "fetch_pot": ["never"],
-                }
-            },
+            "extractor_args": {"youtube": yt_extractor_args},
             "concurrent_fragment_downloads": 16,
             "http_chunk_size": 10485760,
             "buffersize": 1024 * 1024 * 5,
@@ -130,10 +137,9 @@ class SongDownloaderAPI:
 
     async def extract_stream(self, query_or_link: str, is_video: bool = False) -> dict | None:
         """
-        استخراج الرابط المباشر + كافة بيانات الأغنية (العنوان، المدة، الصورة، الحجم بالبايت)
-        في خطوة واحدة مدمجة:
+        استخراج الرابط المباشر + كافة بيانات الأغنية بدون كوكيز:
         1) أولاً عبر محرك Innertube المباشر (orjson + aiohttp IPv4) في ~80ms بدون تشغيل yt-dlp!
-        2) وإذا لم تتوفر الصيغة المباشرة، ينتقل تلقائياً لـ yt-dlp 2026.10.21 (visionos + tv_samsung).
+        2) وإذا لم تتوفر الصيغة المباشرة، ينتقل تلقائياً لـ yt-dlp 2026.10.21 بدون كوكيز.
         """
         link = query_or_link.strip()
         if "googleusercontent.com" in link and "v=" in link:
@@ -147,10 +153,9 @@ class SongDownloaderAPI:
         if cached_info:
             return cached_info
 
-        # 🚀 المسار السريع المدمج (80ms) عبر Innertube المباشر بدون yt-dlp
         if not (is_video and self.force_high_quality):
             fast_data = await YouTube.extract_fast_stream_info(link, is_video=is_video)
-            if fast_data and fast_data.get("direct_url"):
+            if fast_data and fast_data.get("direct_url") and fast_data.get("can_direct_pump"):
                 self._stream_cache[cache_key] = fast_data
                 self._stream_cache[
                     f"https://www.youtube.com/watch?v={fast_data['vidid']}|{'v' if is_video else 'a'}"
@@ -214,6 +219,7 @@ class SongDownloaderAPI:
                         "vcodec": vcodec,
                         "ext": ext,
                         "headers": headers,
+                        "available_at": info.get("available_at") or 0,
                         "can_direct_pump": bool(
                             direct_url
                             and "m3u8" not in direct_url
@@ -227,6 +233,7 @@ class SongDownloaderAPI:
         try:
             data = await loop.run_in_executor(self.pool, _extract_only)
             if data and data.get("vidid"):
+                await YouTube._respect_available_at(data)
                 self._stream_cache[cache_key] = data
                 self._stream_cache[
                     f"https://www.youtube.com/watch?v={data['vidid']}|{'v' if is_video else 'a'}"
