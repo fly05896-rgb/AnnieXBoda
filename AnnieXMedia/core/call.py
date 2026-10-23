@@ -1,6 +1,6 @@
 # Authored By Certified Coders © 2026
 # System: PyTgCalls V3.0.0 & NTgCalls V3.0.5 Core Call Controller
-# Fixes: FFmpeg EOF Hang Patch + Real NTgCalls Playback State Verification (Zero Ghost Queue)
+# Fixes: Clean FFprobe Stream (No Malformed Headers) + Auto-Recovery on NoAudioSourceFound + FFmpeg EOF Hang Patch + Zero Ghost Queue
 
 import asyncio
 import logging
@@ -18,6 +18,8 @@ from pyrogram.types import InlineKeyboardMarkup, InputMediaPhoto
 from pytgcalls import PyTgCalls, filters
 from pytgcalls.exceptions import (
     NoActiveGroupCall,
+    NoAudioSourceFound,
+    NoVideoSourceFound,
     NotInCallError,
 )
 from pytgcalls.types import (
@@ -57,15 +59,16 @@ from AnnieXMedia.utils.thumbnails import get_thumb
 
 # ==========================================================
 # 🔥 إصلاح جذري لمشكلة تعليق نهاية الأغنية في PyTgCalls 3.0.0:
-# مكتبة pytgcalls تضيف تلقائياً (-reconnect_at_eof 1) لروابط HTTP مما يمنع FFmpeg
-# من الإغلاق عند انتهاء الأغنية، فلا ينطلق حدث StreamEnded وتدخل الأغاني التالية في الانتظار!
-# هذا الباتش يزيل (-reconnect_at_eof 1) ليغلق FFmpeg فور انتهاء آخر ثانية في الأغنية.
+# يزيل (-reconnect_at_eof 1) من أوامر ffmpeg فقط (دون المساس بـ ffprobe نهائياً)
+# ليغلق FFmpeg فور انتهاء آخر ثانية في الأغنية وينطلق حدث StreamEnded.
 # ==========================================================
 if not getattr(_pytg_ffmpeg, "_annie_eof_patched", False):
     _orig_build_cmd = _pytg_ffmpeg.build_command
 
     def _patched_build_command(*args, **kwargs) -> list[str]:
         cmd = _orig_build_cmd(*args, **kwargs)
+        if not cmd or cmd[0] != "ffmpeg":
+            return cmd
         cleaned: list[str] = []
         skip_next = False
         for token in cmd:
@@ -106,13 +109,13 @@ counter = {}
 def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> MediaStream:
     """
     بناء مجرى البيانات متوافق 100% مع PyTgCalls 3.0.0 و NTgCalls 3.0.5:
-    - تمرير User-Agent Headers تلقائياً لروابط يوتيوب المباشرة لمنع HTTP 403
+    - بدون تمرير headers لـ MediaStream لأن pytgcalls يمرر -headers بدون CRLF إلى ffprobe
+      مما يتسبب في رفض googlevideo للطلب وظهور خطأ NoAudioSourceFound!
     - تحديد AudioQuality.HIGH (48kHz) و VideoQuality.HD_720p (30fps)
     """
     path = str(path)
     base_flags = "-probesize 512k -analyzeduration 1000000 "
     final_ffmpeg = (base_flags + ffmpeg_opts).strip()
-    headers = YouTube.get_stream_headers(path) if path.startswith("http") and "googlevideo.com" in path else None
 
     return MediaStream(
         media_path=path,
@@ -120,7 +123,6 @@ def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> Medi
         video_parameters=VideoQuality.HD_720p,
         audio_flags=MediaStream.Flags.REQUIRED,
         video_flags=MediaStream.Flags.REQUIRED if video else MediaStream.Flags.IGNORE,
-        headers=headers,
         ffmpeg_parameters=final_ffmpeg if final_ffmpeg else None,
     )
 
@@ -167,11 +169,8 @@ class Call:
     async def is_truly_playing(self, chat_id: int) -> bool:
         """
         🔥 الفحص الحقيقي لمنع دخول الأغاني في طابور الانتظار الوهمي بعد انتهاء الأغنية:
-        يتحقق من:
-        1. وجود الشات في active_chats ووجود عناصر فعلية في db[chat_id]
-        2. حالة المحرك الفعلي داخل NTgCalls (assistant.calls) بحيث إذا كان IDLE أو غير متصل
-           أو انتهى وقت الأغنية الوحيدة في الطابور، يقوم بتصفير الطابور القديم فوراً ويرجع False
-           لتشتغل الأغنية الجديدة مباشرة!
+        يتحقق من حالة المحرك الفعلي داخل NTgCalls (assistant.calls) بحيث إذا كان IDLE أو غير متصل
+        أو انتهى وقت الأغنية الوحيدة في الطابور، يقوم بتصفير الطابور القديم فوراً ويرجع False.
         """
         if not await is_active_chat(chat_id):
             return False
@@ -192,14 +191,12 @@ class Call:
             ntg_calls = await assistant.calls
             call_info = ntg_calls.get(chat_id)
 
-            # إذا لم يكن الشات في مكالمات NTgCalls أصلاً أو كانت حالة البث IDLE (انتهت الأغنية)
             if call_info is None or call_info.playback == TgCallData.Status.IDLE:
                 if not self.is_joining(chat_id):
                     await _clear_(chat_id)
                     self.active_calls.discard(chat_id)
                     return False
 
-            # فحص إضافي: إذا كانت هناك أغنية واحدة فقط في الطابور وتجاوز عدادها مدتها الفعلية
             if len(queue) == 1:
                 dur_sec = int(queue[0].get("seconds") or 0)
                 played_sec = int(queue[0].get("played") or 0)
@@ -339,22 +336,16 @@ class Call:
 
             if not os.path.exists(out_file):
                 setpts = round(1.0 / spd, 4)
-                input_args = []
-                if str(target_input).startswith("http") and "googlevideo.com" in str(target_input):
-                    ua = YouTube.get_stream_headers(str(target_input)).get("User-Agent", "")
-                    if ua:
-                        input_args = ["-user_agent", ua]
-
                 if is_video:
                     cmd = [
-                        "ffmpeg", "-y", *input_args, "-i", str(target_input),
+                        "ffmpeg", "-y", "-i", str(target_input),
                         "-filter:v", f"setpts={setpts}*PTS",
                         "-filter:a", f"atempo={spd}",
                         "-preset", "ultrafast", out_file,
                     ]
                 else:
                     cmd = [
-                        "ffmpeg", "-y", *input_args, "-i", str(target_input),
+                        "ffmpeg", "-y", "-i", str(target_input),
                         "-vn", "-filter:a", f"atempo={spd}",
                         out_file,
                     ]
@@ -388,7 +379,17 @@ class Call:
         async with self.get_lock(chat_id):
             assistant = await group_assistant(self, chat_id)
             stream = _build_stream(link, video=video)
-            await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
+            try:
+                await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
+            except (NoAudioSourceFound, NoVideoSourceFound):
+                q = db.get(chat_id)
+                vid = q[0].get("vidid") if q else None
+                recovered = await YouTube.recover_stream(link, videoid=vid, video=video)
+                if recovered:
+                    stream = _build_stream(recovered, video=video)
+                    await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
+                else:
+                    raise
             self.active_calls.add(chat_id)
             await add_active_chat(chat_id)
             if video:
@@ -428,6 +429,18 @@ class Call:
                     try:
                         await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
                         break
+                    except (NoAudioSourceFound, NoVideoSourceFound) as media_err:
+                        if attempt < max_retries - 1:
+                            q = db.get(chat_id)
+                            vid = q[0].get("vidid") if q else None
+                            recovered = await YouTube.recover_stream(link, videoid=vid, video=video)
+                            if recovered:
+                                link = recovered
+                                stream = _build_stream(link, video=video)
+                                continue
+                        self.active_calls.discard(chat_id)
+                        await remove_active_chat(chat_id)
+                        raise AssistantErr(f"Error: {media_err}")
                     except (NoActiveGroupCall, ChatAdminRequired, errors.GroupcallForbidden):
                         if attempt < max_retries - 1:
                             await asyncio.sleep(1.0)
@@ -496,7 +509,6 @@ class Call:
         assistants = list(filter(None, [self.one, self.two, self.three, self.four, self.five]))
 
         for assistant in assistants:
-            # الاستماع لانتهاء الصوت أو الفيديو مع منع التكرار عبر _stream_end_cache
             @assistant.on_update(filters.stream_end())
             async def stream_end_handler(client: PyTgCalls, update: Update):
                 if isinstance(update, StreamEnded):
@@ -559,7 +571,6 @@ class Call:
                     await auto_clean(popped)
 
                 if not check:
-                    # حذف رسالة المشغل السابقة إن وجدت عند انتهاء الطابور
                     if popped and popped.get("mystic"):
                         with suppress(Exception):
                             await popped.get("mystic").delete()
@@ -627,11 +638,11 @@ class Call:
                 try:
                     await client.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
                 except Exception:
-                    if needs_yt_resolve and videoid:
-                        YouTube.invalidate_cache(videoid)
-                        fresh_link = await YouTube.get_direct_link(
-                            f"https://www.youtube.com/watch?v={videoid}",
-                            prefer_audio=not is_video,
+                    if videoid:
+                        fresh_link = await YouTube.recover_stream(
+                            final_link,
+                            videoid=str(videoid),
+                            video=is_video,
                         )
                         if fresh_link:
                             stream = _build_stream(fresh_link, video=is_video)
