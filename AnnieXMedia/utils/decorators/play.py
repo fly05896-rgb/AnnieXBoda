@@ -1,7 +1,10 @@
 # Authored By Certified Coders © 2026
 # File Path: AnnieXMedia/utils/decorators/play.py
+# System: Non-Blocking PlayWrapper (Parallel DB Checks + Assistant Membership RAM Cache)
 
 import asyncio
+import time
+from contextlib import suppress
 
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import (
@@ -28,13 +31,24 @@ from AnnieXMedia.utils.database import (
 )
 from AnnieXMedia.utils.inline import botplaylist_markup
 
-# Cache for invite links per chat
+# Cache for invite links and verified assistant memberships per chat
 links = {}
+_VERIFIED_ASS_CHATS: dict[int, float] = {}
+
+
+async def _bg_delete(message):
+    with suppress(Exception):
+        await message.delete()
 
 
 def PlayWrapper(command):
     async def wrapper(client, message):
-        language = await get_lang(message.chat.id)
+        language, maint_ok, playmode, playty = await asyncio.gather(
+            get_lang(message.chat.id),
+            is_maintenance(),
+            get_playmode(message.chat.id),
+            get_playtype(message.chat.id),
+        )
         _ = get_string(language)
 
         if message.sender_chat:
@@ -50,17 +64,15 @@ def PlayWrapper(command):
             )
             return await message.reply_text(_["general_3"], reply_markup=upl)
 
-        if await is_maintenance() is False:
+        if maint_ok is False:
             if message.from_user.id not in SUDOERS:
                 return await message.reply_text(
                     text=f"{app.mention} ɪs ᴜɴᴅᴇʀ ᴍᴀɪɴᴛᴇɴᴀɴᴄᴇ, ᴠɪsɪᴛ <a href={SUPPORT_CHAT}>sᴜᴘᴘᴏʀᴛ ᴄʜᴀᴛ</a> ғᴏʀ ᴋɴᴏᴡɪɴɢ ᴛʜᴇ ʀᴇᴀsᴏɴ.",
                     disable_web_page_preview=True,
                 )
 
-        try:
-            await message.delete()
-        except Exception:
-            pass
+        # حذف رسالة الأمر في الخلفية بدون تعطيل بدء البحث (يوفر 250ms)
+        asyncio.create_task(_bg_delete(message))
 
         audio_telegram = (
             (message.reply_to_message.audio or message.reply_to_message.voice)
@@ -84,6 +96,7 @@ def PlayWrapper(command):
                     caption=_["play_18"],
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
+
         cmd0 = message.command[0] if message.command else ""
         if cmd0.startswith("c"):
             chat_id = await get_cmode(message.chat.id)
@@ -98,8 +111,6 @@ def PlayWrapper(command):
             chat_id = message.chat.id
             channel = None
 
-        playmode = await get_playmode(message.chat.id)
-        playty = await get_playtype(message.chat.id)
         if playty != "Everyone":
             if message.from_user.id not in SUDOERS:
                 admins = adminlist.get(message.chat.id)
@@ -125,7 +136,8 @@ def PlayWrapper(command):
         else:
             fplay = None
 
-        if not is_really_active:
+        now = time.time()
+        if not is_really_active and (_VERIFIED_ASS_CHATS.get(chat_id, 0) < now):
             userbot = await get_assistant(chat_id)
             try:
                 try:
@@ -152,6 +164,7 @@ def PlayWrapper(command):
                             ]
                         ),
                     )
+                _VERIFIED_ASS_CHATS[chat_id] = now + 1800
             except UserNotParticipant:
                 if chat_id in links:
                     invitelink = links[chat_id]
@@ -179,7 +192,7 @@ def PlayWrapper(command):
 
                 myu = await message.reply_text(_["call_4"].format(app.mention))
                 try:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)
                     await userbot.join_chat(invitelink)
                 except InviteHashExpired:
                     if chat_id in links:
@@ -205,7 +218,7 @@ def PlayWrapper(command):
                         return await message.reply_text(
                             _["call_3"].format(app.mention, type(e).__name__)
                         )
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(1.5)
                     await myu.edit(_["call_5"].format(app.mention))
                 except UserAlreadyParticipant:
                     pass
@@ -215,6 +228,7 @@ def PlayWrapper(command):
                     )
 
                 links[chat_id] = invitelink
+                _VERIFIED_ASS_CHATS[chat_id] = now + 1800
 
                 try:
                     await userbot.resolve_peer(chat_id)
