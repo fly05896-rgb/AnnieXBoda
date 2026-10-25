@@ -1,5 +1,5 @@
 # System: Azan Maestro (Enterprise Edition)
-# File: __init__.py
+# File Path: AnnieXMedia/plugins/AzanSystem/__init__.py
 
 from AnnieXMedia import app
 
@@ -12,12 +12,13 @@ from . import az_quran
 from . import az_broadcast
 
 # 2. استيراد أدوات الجدولة
-from .az_utils import scheduler
+from .az_utils import scheduler, init_azan_scheduler
 from .az_broadcast import init_broadcast_schedule
 
-# 3. تفعيل نظام النشر التلقائي وربطه بالمجدول العام
+# 3. تفعيل مجدول الأذان ومجدول النشر التلقائي فور تشغيل البوت بدون انتظار أول رسالة
 try:
     init_broadcast_schedule(scheduler)
-    print("[Azan System] Integrated & Loaded Successfully.")
+    init_azan_scheduler()
+    print("[Azan System] Integrated & Scheduler Started Successfully.")
 except Exception as e:
     print(f"[Azan System] Scheduler Init Error: {e}")
