@@ -1,6 +1,6 @@
 # Authored By Certified Coders © 2026
 # File Path: AnnieXMedia/utils/stream/stream.py
-# System: Stream Controller (Real NTgCalls Playback Check & Instant Pre-Cached Link Bridge)
+# System: Stream Controller (Atomic Queue Reservation & Instant Pre-Cached Link Bridge)
 
 import asyncio
 import contextlib
@@ -11,9 +11,10 @@ from pyrogram.types import InlineKeyboardMarkup
 
 import config
 from AnnieXMedia import Carbon, YouTube, app
-from AnnieXMedia.core.call import StreamController
+from AnnieXMedia.core.call import StreamController, _clear_
 from AnnieXMedia.misc import db
 from AnnieXMedia.utils.database import (
+    add_active_chat,
     add_active_video_chat,
     remove_active_video_chat,
 )
@@ -88,7 +89,9 @@ async def stream(
                     user_id,
                     "video" if is_video else "audio",
                 )
-                position = len(db.get(chat_id)) - 1
+                if len(str(vidid)) == 11:
+                    asyncio.create_task(YouTube._innertube_player(str(vidid)))
+                position = max(1, len(db.get(chat_id) or []) - 1)
                 button = aq_markup(_, chat_id)
                 try:
                     await mystic.edit_text(
@@ -111,7 +114,8 @@ async def stream(
                 file_path = await YouTube.download(
                     vidid, None, video=is_video, videoid=get_download_id(vidid)
                 )
-                direct = True
+                if isinstance(file_path, tuple):
+                    file_path = file_path[0]
             except Exception as e:
                 print(f"\n🚨 [CUSTOM MODE] Download Error: {type(e).__name__}")
                 traceback.print_exc()
@@ -120,19 +124,11 @@ async def stream(
             if not file_path:
                 return await app.send_message(original_chat_id, text=_["play_14"])
 
-            try:
-                await StreamController.join_call(chat_id, original_chat_id, file_path, video=is_video)
-            except AssistantErr as e:
-                return await app.send_message(original_chat_id, text=str(e))
-            except Exception as e:
-                print(f"\n🚨 [CUSTOM MODE] Join Call Error: {type(e).__name__}")
-                traceback.print_exc()
-                return await app.send_message(original_chat_id, text=f"Error: [{type(e).__name__}] {e}")
-
+            # حجز الطابور قبل join_call لمنع أي أمر تشغيل متزامن من تخطي الأغنية الأولى
             await put_queue(
                 chat_id,
                 original_chat_id,
-                file_path if direct else f"vid_{vidid}",
+                file_path,
                 title,
                 duration_min,
                 user_name,
@@ -141,6 +137,18 @@ async def stream(
                 "video" if is_video else "audio",
                 forceplay=True,
             )
+            await add_active_chat(chat_id)
+
+            try:
+                await StreamController.join_call(chat_id, original_chat_id, file_path, video=is_video)
+            except AssistantErr as e:
+                await _clear_(chat_id)
+                return await app.send_message(original_chat_id, text=str(e))
+            except Exception as e:
+                await _clear_(chat_id)
+                print(f"\n🚨 [CUSTOM MODE] Join Call Error: {type(e).__name__}")
+                traceback.print_exc()
+                return await app.send_message(original_chat_id, text=f"Error: [{type(e).__name__}] {e}")
 
             button = custom_markup(_, chat_id, vidid)
             try:
@@ -193,9 +201,10 @@ async def stream(
                         file_path = await YouTube.download(
                             vidid, mystic, video=is_video, videoid=get_download_id(vidid)
                         )
+                        if isinstance(file_path, tuple):
+                            file_path = file_path[0]
                         if not file_path:
                             continue
-                        await StreamController.join_call(chat_id, original_chat_id, file_path, video=is_video)
                         await put_queue(
                             chat_id,
                             original_chat_id,
@@ -208,6 +217,9 @@ async def stream(
                             "video" if is_video else "audio",
                             forceplay=True,
                         )
+                        await add_active_chat(chat_id)
+                        await StreamController.join_call(chat_id, original_chat_id, file_path, video=is_video)
+
                         img = f"https://i.ytimg.com/vi/{vidid}/hqdefault.jpg" if vidid else config.YOUTUBE_IMG_URL
                         button = stream_markup(_, chat_id)
                         asyncio.create_task(safe_delete(mystic))
@@ -231,6 +243,7 @@ async def stream(
                         first_idx = idx
                         break
                     except Exception as e:
+                        await _clear_(chat_id)
                         print(f"\n🚨 [PLAYLIST MODE] Download/Join Error: {type(e).__name__}")
                         traceback.print_exc()
                         continue
@@ -262,7 +275,7 @@ async def stream(
                         user_id,
                         "video" if is_video else "audio",
                     )
-                    position = len(db.get(chat_id)) - 1
+                    position = max(1, len(db.get(chat_id) or []) - 1)
                     count += 1
                     msg += f"{count}. {title[:70]}\n{_['play_20']} {position}\n\n"
 
@@ -314,7 +327,7 @@ async def stream(
 
             is_active = await StreamController.is_truly_playing(chat_id)
 
-            # --- ACTION 1: ADD TO QUEUE ---
+            # --- ACTION 1: ADD TO QUEUE (عند وجود أغنية شغالة بالفعل) ---
             if is_active and not forceplay:
                 if is_index:
                     await put_queue_index(
@@ -339,8 +352,11 @@ async def stream(
                         user_id,
                         "video" if is_video else "audio",
                     )
+                    # تجهيز الرابط المباشر للأغنية في الكاش مسبقاً لتعمل في 0ms عند دورها
+                    if streamtype == "youtube" and len(str(vidid)) == 11:
+                        asyncio.create_task(YouTube._innertube_player(str(vidid)))
 
-                position = len(db.get(chat_id)) - 1
+                position = max(1, len(db.get(chat_id) or []) - 1)
                 button = aq_markup(_, chat_id)
 
                 if is_index:
@@ -365,7 +381,7 @@ async def stream(
                     )
                 return
 
-            # --- ACTION 2: PLAY IMMEDIATELY ---
+            # --- ACTION 2: PLAY IMMEDIATELY (عند عدم وجود أغنية شغالة أو forceplay) ---
             if not forceplay:
                 db[chat_id] = []
 
@@ -376,6 +392,8 @@ async def stream(
                         play_path = await YouTube.download(
                             vidid, mystic, video=is_video, videoid=get_download_id(vidid)
                         )
+                        if isinstance(play_path, tuple):
+                            play_path = play_path[0]
                     case "live":
                         n, play_path = await YouTube.video(link, videoid=vidid)
                         if n == 0:
@@ -386,41 +404,45 @@ async def stream(
                 if not play_path:
                     raise AssistantErr(_["play_14"])
 
+                # حجز الطابور وتفعيل المحادثة فوراً قبل join_call لمنع التخطي عند إرسال أمر تشغيل ثانٍ بسرعة
+                if is_index:
+                    await put_queue_index(
+                        chat_id,
+                        original_chat_id,
+                        q_path,
+                        title,
+                        duration_min,
+                        user_name,
+                        link,
+                        "video" if is_video else "audio",
+                        forceplay=True,
+                    )
+                else:
+                    await put_queue(
+                        chat_id,
+                        original_chat_id,
+                        q_path,
+                        title,
+                        duration_min,
+                        user_name,
+                        vidid,
+                        user_id,
+                        "video" if is_video else "audio",
+                        forceplay=True,
+                    )
+                await add_active_chat(chat_id)
+
                 await StreamController.join_call(chat_id, original_chat_id, play_path, video=is_video)
             except AssistantErr as e:
+                await _clear_(chat_id)
                 await safe_delete(mystic)
                 return await app.send_message(original_chat_id, text=str(e))
             except Exception as e:
+                await _clear_(chat_id)
                 print(f"\n🚨🚨🚨 FATAL STREAM ENGINE ERROR (Type: {type(e).__name__}) 🚨🚨🚨")
                 traceback.print_exc()
                 await safe_delete(mystic)
                 return await app.send_message(original_chat_id, text=f"Error: [{type(e).__name__}] {str(e)}")
-
-            if is_index:
-                await put_queue_index(
-                    chat_id,
-                    original_chat_id,
-                    q_path,
-                    title,
-                    duration_min,
-                    user_name,
-                    link,
-                    "video" if is_video else "audio",
-                    forceplay=True,
-                )
-            else:
-                await put_queue(
-                    chat_id,
-                    original_chat_id,
-                    q_path,
-                    title,
-                    duration_min,
-                    user_name,
-                    vidid,
-                    user_id,
-                    "video" if is_video else "audio",
-                    forceplay=True,
-                )
 
             await _sync_video_state(chat_id, is_video)
 
