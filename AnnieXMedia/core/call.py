@@ -1,7 +1,7 @@
 # Authored By Certified Coders © 2026
 # File Path: AnnieXMedia/core/call.py
 # System: PyTgCalls V3.0.0 & NTgCalls V3.0.5 Core Call Controller
-# Features: Zero-Probe FastMediaStream (~154ms First Audio Pump) + Zero Ghost Queue + Non-Blocking AutoEnd
+# Features: Zero-Probe FastMediaStream (~154ms First Audio Pump) + Fixed Capture Queue Check + Non-Blocking AutoEnd
 
 import asyncio
 import logging
@@ -181,7 +181,9 @@ class Call:
 
     async def is_truly_playing(self, chat_id: int) -> bool:
         """
-        فحص حقيقي من داخل NTgCalls لمنع دخول الأغاني في قائمة الانتظار الوهمية بعد انتهاء الأغنية
+        فحص حقيقي من داخل NTgCalls:
+        في NTgCalls، البث الصوتي/المرئي الخارج للجمهور يُخزن في (call_info.capture) وليس (playback).
+        إذا كان capture في حالة ACTIVE أو PAUSED فالأغنية شغالة فعلياً ويتم الإضافة للطابور.
         """
         if not await is_active_chat(chat_id):
             return False
@@ -191,6 +193,9 @@ class Call:
             await _clear_(chat_id)
             self.active_calls.discard(chat_id)
             return False
+
+        if self.is_joining(chat_id):
+            return True
 
         try:
             assistant = await group_assistant(self, chat_id)
@@ -202,16 +207,9 @@ class Call:
             ntg_calls = await assistant.calls
             call_info = ntg_calls.get(chat_id)
 
-            if call_info is None or call_info.playback == TgCallData.Status.IDLE:
+            # 🔥 فحص capture (البث الخارج من البوت للمكالمة) وليس playback (التسجيل)
+            if call_info is None or call_info.capture == TgCallData.Status.IDLE:
                 if not self.is_joining(chat_id):
-                    await _clear_(chat_id)
-                    self.active_calls.discard(chat_id)
-                    return False
-
-            if len(queue) == 1:
-                dur_sec = int(queue[0].get("seconds") or 0)
-                played_sec = int(queue[0].get("played") or 0)
-                if dur_sec > 0 and played_sec >= dur_sec + 5:
                     await _clear_(chat_id)
                     self.active_calls.discard(chat_id)
                     return False
@@ -432,7 +430,6 @@ class Call:
                 )
                 _ = get_string(lang)
 
-                # فحص القناة فقط في حالة التشغيل في القنوات (cplay) لتوفير 300ms في الجروبات العادية
                 if chat_id != original_chat_id:
                     with suppress(Exception):
                         chat = await app.get_chat(chat_id)
@@ -490,7 +487,6 @@ class Call:
                 else:
                     await remove_active_video_chat(chat_id)
 
-                # تشغيل فحص المغادرة التلقائية في الخلفية بدون تعطيل استجابة البوت
                 asyncio.create_task(self._check_autoend_bg(assistant, chat_id))
             finally:
                 async def _release_join_flag(cid: int):
