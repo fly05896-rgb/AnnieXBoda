@@ -1,6 +1,6 @@
 # Authored By Certified Coders © 2026
 # File Path: AnnieXMedia/plugins/AzanSystem/az_utils.py
-# System: Azan Maestro Engine (Compatible with Zero-Probe FastMediaStream & Cookie-Free YouTube API)
+# System: Azan Maestro Engine (Compatible with DEFAULT_RESOURCES & Zero-Cookie YouTube Engine)
 
 import asyncio
 import functools
@@ -144,10 +144,6 @@ async def load_resources():
         if stored_res:
             for k, v in stored_res.get("data", {}).items():
                 if k in CURRENT_RESOURCES and isinstance(v, dict):
-                    # تصحيح أي رابط يوتيوب قديم محفوظ بصيغة youtu.be/watch?v=
-                    link_val = str(v.get("link") or "")
-                    if "youtu.be/watch?v=" in link_val:
-                        v["link"] = link_val.replace("youtu.be/watch?v=", "www.youtube.com/watch?v=")
                     CURRENT_RESOURCES[k].update(v)
 
         dua_res = await resources_db.find_one({"type": "dua_sticker"})
@@ -160,7 +156,7 @@ async def load_resources():
 
 
 # ==================================================================
-# [SECTION 2] Smart Assistant Prep (Uses Exact Group Assistant)
+# [SECTION 2] Smart Assistant Prep
 # ==================================================================
 
 async def prepare_assistant_membership(chat_id: int) -> bool:
@@ -218,7 +214,6 @@ async def prepare_assistant_membership(chat_id: int) -> bool:
 # ==================================================================
 
 async def _cache_url_to_disk_bg(direct_url: str, target_path: str) -> None:
-    """تحميل صوت الأذان في الخلفية من الرابط المباشر لحفظه على الديسك للمرات القادمة"""
     try:
         if os.path.exists(target_path) and os.path.getsize(target_path) > 10240:
             return
@@ -239,8 +234,8 @@ async def _cache_url_to_disk_bg(direct_url: str, target_path: str) -> None:
 
 async def resolve_azan_media(prayer_key: str, play_target: Optional[str] = None) -> Optional[str]:
     """
-    تحويل مصدر الأذان (سواء كان ملف محلي أو file_id تيليجرام أو رابط يوتيوب أو vidid)
-    إلى مسار ملف صوتي جاهز أو رابط بث مباشر متوافق 100% مع FastMediaStream و FFmpeg!
+    يدعم روابط DEFAULT_RESOURCES (سواء كانت https://youtu.be/watch?v=... أو https://www.youtube.com/watch?v=...)
+    أو ملفات تيليجرام (TelegramFile) أو الملفات المحلية، ويحولها إلى مسار/رابط صوتي مباشر صالح لـ FFmpeg.
     """
     os.makedirs("downloads", exist_ok=True)
     res = CURRENT_RESOURCES.get(prayer_key) or {}
@@ -250,11 +245,11 @@ async def resolve_azan_media(prayer_key: str, play_target: Optional[str] = None)
     if not raw_source and not vidid:
         return None
 
-    # 1. إذا كان مسار ملف محلي موجود بالفعل على السيرفر
+    # 1. ملف محلي محفوظ مسبقاً
     if os.path.exists(raw_source) and os.path.getsize(raw_source) > 10240:
         return os.path.abspath(raw_source)
 
-    # 2. إذا كان المطور قد غيّر صوت الأذان إلى ملف تيليجرام (file_id)
+    # 2. ملف صوتي مرفوع على تيليجرام (file_id)
     is_tg_file = (
         vidid == "TelegramFile"
         or (not raw_source.startswith(("http://", "https://", "/")) and len(raw_source) > 20)
@@ -271,26 +266,25 @@ async def resolve_azan_media(prayer_key: str, play_target: Optional[str] = None)
             logger.error(f"Failed to download custom Telegram Azan file_id: {e}")
             return None
 
-    # 3. إذا كان رابط يوتيوب أو Video ID
-    extracted_vid = extract_vidid(raw_source) or (vidid if len(vidid) == 11 else None)
+    # 3. استخراج الـ Video ID من vidid أو من رابط youtu.be/watch?v= أو youtube.com/watch?v=
+    extracted_vid = (vidid if len(vidid) == 11 else None) or extract_vidid(raw_source)
     if extracted_vid and len(extracted_vid) == 11:
         local_yt_cache = os.path.abspath(f"downloads/azan_{prayer_key}_{extracted_vid}.m4a")
         if os.path.exists(local_yt_cache) and os.path.getsize(local_yt_cache) > 10240:
             return local_yt_cache
 
-        # استخراج الرابط الصوتي المباشر عبر محرك YouTube السريع (VISIONOS itag=140 / ANDROID itag=18 في ~50ms)
-        direct_url = await YouTube.download(
-            f"https://www.youtube.com/watch?v={extracted_vid}",
+        res_dl = await YouTube.download(
+            extracted_vid,
             None,
             video=False,
-            videoid=extracted_vid,
+            videoid=True,
         )
+        direct_url = res_dl[0] if isinstance(res_dl, tuple) else res_dl
         if direct_url:
-            # حفظ نسخة محلية في الخلفية ليعمل في 0ms في الصلوات القادمة
             asyncio.create_task(_cache_url_to_disk_bg(direct_url, local_yt_cache))
             return direct_url
 
-    # 4. إذا كان رابط صوتي خارجي مباشر (mp3 / m4a)
+    # 4. رابط صوتي خارجي مباشر
     if raw_source.startswith(("http://", "https://")):
         return raw_source
 
@@ -298,7 +292,6 @@ async def resolve_azan_media(prayer_key: str, play_target: Optional[str] = None)
 
 
 async def _direct_join_call(chat_id: int, playable_path: str) -> bool:
-    """دخول الكول أو تبديل البث بضمان كامل عبر join_call ثم skip_stream"""
     try:
         await StreamController.join_call(chat_id, chat_id, playable_path, video=False)
         return True
@@ -328,7 +321,6 @@ async def start_azan_stream(
         if not res:
             return
 
-        # تحويل الرابط أو الـ file_id إلى مسار/رابط صوتي مباشر صالح لـ FFmpeg
         playable_file = await resolve_azan_media(prayer_key, play_target)
         if not playable_file:
             if force_test:
@@ -340,7 +332,7 @@ async def start_azan_stream(
 
         db[chat_id] = [
             {
-                "vidid": "adhan_local",
+                "vidid": res.get("vidid") or "adhan_local",
                 "title": f"أذان {res.get('name')}",
                 "duration": "04:00",
                 "streamtype": "audio",
@@ -400,7 +392,7 @@ async def start_azan_stream(
 
 
 # ==================================================================
-# [SECTION 4] Broadcaster & Scheduler (Optimized for Concurrency)
+# [SECTION 4] Broadcaster & Scheduler
 # ==================================================================
 
 async def broadcast_azan(prayer_key: str):
@@ -409,7 +401,6 @@ async def broadcast_azan(prayer_key: str):
     if not res:
         return
 
-    # استخراج أو تجهيز ملف الأذان مرة واحدة فقط قبل توزيعه على كل الجروبات
     playable_media = await resolve_azan_media(prayer_key)
     if not playable_media:
         logger.error(f"Failed to resolve Azan media for {prayer_key}")
