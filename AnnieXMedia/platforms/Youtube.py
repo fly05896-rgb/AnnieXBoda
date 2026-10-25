@@ -237,8 +237,8 @@ class YouTubeAPI:
                     "client": {
                         "clientName": "WEB",
                         "clientVersion": "2.20260708.00.00",
-                        "hl": "en",
-                        "gl": "US",
+                        "hl": "ar",
+                        "gl": "EG",
                     }
                 }
             }
@@ -349,7 +349,8 @@ class YouTubeAPI:
                     "deviceModel": "RealityDevice17,1",
                     "osName": "visionOS",
                     "osVersion": "26.5.23O471",
-                    "hl": "en",
+                    "hl": "ar",
+                    "gl": "EG",
                     "timeZone": "UTC",
                     "utcOffsetMinutes": 0,
                 },
@@ -366,7 +367,8 @@ class YouTubeAPI:
                     "androidSdkVersion": 30,
                     "osName": "Android",
                     "osVersion": "11",
-                    "hl": "en",
+                    "hl": "ar",
+                    "gl": "EG",
                     "timeZone": "UTC",
                     "utcOffsetMinutes": 0,
                 },
@@ -404,9 +406,10 @@ class YouTubeAPI:
             vision_sd = (vision_data or {}).get("streamingData") or {}
             android_sd = (android_data or {}).get("streamingData") or {}
 
-            # 1. استخراج رابط الصوت النقي itag=140 من VISIONOS (الأسرع في ضخ الصوت 154ms)
+            # 1. استخراج رابط الصوت النقي itag=140 من VISIONOS مع اختيار المسار الأصلي (منع الدبلجة الإنجليزية التلقائية)
             vision_audio_url: str | None = None
             vision_audio_fmt: dict[str, Any] = {}
+            best_audio_score = -999
             for fmt in vision_sd.get("adaptiveFormats", []):
                 f_url = fmt.get("url")
                 if not f_url:
@@ -414,10 +417,25 @@ class YouTubeAPI:
                 mime = str(fmt.get("mimeType", ""))
                 itag = str(fmt.get("itag", ""))
                 if "audio" in mime:
-                    vision_audio_url = f_url
-                    vision_audio_fmt = fmt
+                    at = fmt.get("audioTrack") or {}
+                    disp = str(at.get("displayName") or "").lower()
+                    tid = str(at.get("id") or "").lower()
+                    if "descriptive" in disp:
+                        score = -100
+                    elif at.get("isAutoDubbed") or "dubbed" in disp:
+                        score = -50
+                    elif not at or "original" in disp or "أصلي" in disp or tid.startswith("ar"):
+                        score = 100
+                    elif at.get("audioIsDefault"):
+                        score = 40
+                    else:
+                        score = 0
                     if itag == "140":
-                        break
+                        score += 20
+                    if score > best_audio_score:
+                        best_audio_score = score
+                        vision_audio_url = f_url
+                        vision_audio_fmt = fmt
 
             # 2. استخراج رابط itag=18 من ANDROID (للفيديو وكبديل مضمون 100% للصوت)
             prog_stream_url: str | None = None
@@ -873,7 +891,7 @@ class YouTubeAPI:
         elif is_video:
             media_format = "18/22/best[ext=mp4]/best[protocol*=m3u8]/best"
         else:
-            media_format = "140/18/bestaudio[ext=m4a]/bestaudio/best"
+            media_format = "bestaudio[ext=m4a][language_preference>=10]/140/18/bestaudio[ext=m4a]/bestaudio/best"
 
         # 2. المسار الاحتياطي السريع عبر yt-dlp (android + visionos فقط — 174ms)
         opts = {**self.fast_opts, "cookiefile": None, "format": media_format}
@@ -919,7 +937,8 @@ class YouTubeAPI:
                 "androidSdkVersion": 30,
                 "osName": "Android",
                 "osVersion": "11",
-                "hl": "en",
+                "hl": "ar",
+                "gl": "EG",
             },
             client_id="3",
             client_ver="21.26.364",
