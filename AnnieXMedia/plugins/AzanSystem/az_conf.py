@@ -1,6 +1,4 @@
-# Authored By Certified Coders © 2026
-# File Path: AnnieXMedia/plugins/AzanSystem/az_conf.py
-
+import copy
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import MONGO_DB_URI, OWNER_ID as CONFIG_OWNER_ID
@@ -75,12 +73,12 @@ NIGHT_DUAS = [
     "أمسينا على فطرة الإسلام، وعلى كلمة الإخلاص، وعلى دين نبينا محمد 💖",
 ]
 
-# --- [ 6. الموارد (تم تصحيح روابط يوتيوب لتعمل مباشرة) ] ---
+# --- [ 6. الموارد (الروابط والاستيكرات) ] ---
 DEFAULT_RESOURCES = {
     "Fajr": {
         "name": "الفجر",
         "vidid": "r9AWBlpantg",
-        "link": "https://www.youtube.com/watch?v=r9AWBlpantg",
+        "link": "https://youtu.be/watch?v=r9AWBlpantg",
         "sticker": "CAACAgQAAyEFAATHCHTJAAIJD2lOq8aLkRR49evBKiITWWhwtgEoAALoGgACp_FYUQuzqVH-JHS5HgQ",
     },
     "Dhuhr": {
@@ -98,16 +96,16 @@ DEFAULT_RESOURCES = {
     "Maghrib": {
         "name": "المغرب",
         "vidid": "hKPcNh7WHoM",
-        "link": "https://www.youtube.com/watch?v=hKPcNh7WHoM",
+        "link": "https://youtu.be/watch?v=hKPcNh7WHoM",
         "sticker": "CAACAgQAAyEFAATHCHTJAAIJFWlOrFT4eOnPJDsSuU6Ya-V0WPQdAALfFwACcIVQUX6NcNNCxvdRHgQ",
     },
     "Isha": {
         "name": "العشاء",
         "vidid": "hKPcNh7WHoM",
-        "link": "https://www.youtube.com/watch?v=hKPcNh7WHoM",
+        "link": "https://youtu.be/watch?v=hKPcNh7WHoM",
         "sticker": "CAACAgQAAyEFAATHCHTJAAIJF2lOrFVxhRGefHki3d4s-hLC9cKHAALqHAAC3oZQUWqQdvdwXnGLHgQ",
     },
 }
 
-CURRENT_RESOURCES = {k: dict(v) for k, v in DEFAULT_RESOURCES.items()}
+CURRENT_RESOURCES = copy.deepcopy(DEFAULT_RESOURCES)
 CURRENT_DUA_STICKER = None
