@@ -1,9 +1,10 @@
 # Authored By Certified Coders © 2026
 # File Path: AnnieXMedia/plugins/AzanSystem/az_utils.py
-# System: Azan Maestro Engine (Compatible with DEFAULT_RESOURCES & Zero-Cookie YouTube Engine)
+# System: Azan Maestro Engine (Original Arabic Audio Track Enforced & Old Dubbed Cache Purged)
 
 import asyncio
 import functools
+import glob
 import logging
 import os
 import random
@@ -57,6 +58,12 @@ logger = logging.getLogger("Azan_Maestro_Stable")
 # --- [ Constants ] ---
 CAIRO_TZ = pytz.timezone("Africa/Cairo")
 scheduler = AsyncIOScheduler(timezone=CAIRO_TZ)
+
+# مسح أي ملفات أذان قديمة مدبلجة بالإنجليزية تم حفظها سابقاً في مجلد downloads
+for _old_dubbed_file in glob.glob("downloads/azan_[A-Za-z]*_*.m4a"):
+    if not os.path.basename(_old_dubbed_file).startswith("azan_orig_"):
+        with suppress(Exception):
+            os.remove(_old_dubbed_file)
 
 
 # ==================================================================
@@ -227,15 +234,15 @@ async def _cache_url_to_disk_bg(direct_url: str, target_path: str) -> None:
                     with open(tmp_path, "wb") as f:
                         f.write(data)
                     os.replace(tmp_path, target_path)
-                    logger.info(f"Cached Azan audio on disk: {target_path}")
+                    logger.info(f"Cached Original Azan audio on disk: {target_path}")
     except Exception as e:
         logger.debug(f"Background Azan cache skipped: {e}")
 
 
 async def resolve_azan_media(prayer_key: str, play_target: Optional[str] = None) -> Optional[str]:
     """
-    يدعم روابط DEFAULT_RESOURCES (سواء كانت https://youtu.be/watch?v=... أو https://www.youtube.com/watch?v=...)
-    أو ملفات تيليجرام (TelegramFile) أو الملفات المحلية، ويحولها إلى مسار/رابط صوتي مباشر صالح لـ FFmpeg.
+    يستخرج المسار الصوتي العربي الأصلي للأذان (بدون الدبلجة الإنجليزية التلقائية)،
+    ويدعم روابط youtu.be/watch?v=... و youtube.com/watch?v=... وملفات تيليجرام.
     """
     os.makedirs("downloads", exist_ok=True)
     res = CURRENT_RESOURCES.get(prayer_key) or {}
@@ -266,13 +273,19 @@ async def resolve_azan_media(prayer_key: str, play_target: Optional[str] = None)
             logger.error(f"Failed to download custom Telegram Azan file_id: {e}")
             return None
 
-    # 3. استخراج الـ Video ID من vidid أو من رابط youtu.be/watch?v= أو youtube.com/watch?v=
+    # 3. استخراج الـ Video ID من vidid أو الرابط، وحفظ النسخة العربية الأصلية باسم azan_orig_
     extracted_vid = (vidid if len(vidid) == 11 else None) or extract_vidid(raw_source)
     if extracted_vid and len(extracted_vid) == 11:
-        local_yt_cache = os.path.abspath(f"downloads/azan_{prayer_key}_{extracted_vid}.m4a")
+        old_dubbed = os.path.abspath(f"downloads/azan_{prayer_key}_{extracted_vid}.m4a")
+        if os.path.exists(old_dubbed):
+            with suppress(Exception):
+                os.remove(old_dubbed)
+
+        local_yt_cache = os.path.abspath(f"downloads/azan_orig_{prayer_key}_{extracted_vid}.m4a")
         if os.path.exists(local_yt_cache) and os.path.getsize(local_yt_cache) > 10240:
             return local_yt_cache
 
+        YouTube.invalidate_cache(extracted_vid)
         res_dl = await YouTube.download(
             extracted_vid,
             None,
