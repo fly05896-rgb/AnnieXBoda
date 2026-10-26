@@ -1,7 +1,6 @@
-# Authored By Certified Coders © 2026
+# Authored By Certified Coders 2026
 # File Path: AnnieXMedia/platforms/Youtube.py
-# System: Ultra-Fast Cookie-Free YouTube Engine (VISIONOS itag=140 + ANDROID itag=18 Parallel + yt-dlp 2026.10.21)
-# Mode: 100% COOKIE-FREE (cookiefile: None) — Benchmarked on Fly.io (~50ms Extract)
+# System: Ultra-Fast Cookie-Free YouTube Engine (Anti-Ban VISIONOS + ANDROID Parallel + yt-dlp 2026.10.21)
 
 import asyncio
 import json
@@ -107,10 +106,6 @@ class YouTubeAPI:
 
         cache_dir = "/dev/shm/ytdlp_cache" if os.path.exists("/dev/shm") else "/tmp/ytdlp_cache"
 
-        # =========================================================================
-        # إعدادات yt-dlp 2026.10.21 الأسرع على سيرفر Fly.io (174ms) بدون أي كوكيز:
-        # نستخدم فقط ["android", "visionos"] مع تخطي webpage, configs, initial_data, js
-        # =========================================================================
         self.fast_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -128,7 +123,7 @@ class YouTubeAPI:
             "cachedir": cache_dir,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android", "visionos"],
+                    "player_client": ["android"],
                     "player_skip": ["webpage", "configs", "initial_data", "js"],
                     "skip": ["dash", "translated_subs"],
                     "fetch_pot": ["never"],
@@ -152,7 +147,7 @@ class YouTubeAPI:
             "cachedir": cache_dir,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["visionos", "android"],
+                    "player_client": ["android", "visionos"],
                     "player_skip": ["webpage", "initial_data"],
                     "skip": ["translated_subs"],
                     "fetch_pot": ["never"],
@@ -237,8 +232,8 @@ class YouTubeAPI:
                     "client": {
                         "clientName": "WEB",
                         "clientVersion": "2.20260708.00.00",
-                        "hl": "ar",
-                        "gl": "EG",
+                        "hl": "en",
+                        "gl": "US",
                     }
                 }
             }
@@ -307,7 +302,7 @@ class YouTubeAPI:
                 raw_bytes = await resp.read()
                 data = _json_loads(raw_bytes)
                 v_data = (data.get("responseContext") or {}).get("visitorData")
-                if v_data and not self._visitor_data:
+                if v_data:
                     self._visitor_data = str(v_data)
                     self._visitor_data_ts = time.time()
                 return data
@@ -316,11 +311,6 @@ class YouTubeAPI:
             return None
 
     async def _innertube_player(self, vid: str) -> dict[str, Any] | None:
-        """
-        استخراج فوري بالتوازي (VISIONOS + ANDROID) في ~55ms بدون كوكيز:
-        - VISIONOS يعطي itag=140 (صوت M4A نقي فائق السرعة 154ms في FFmpeg) + HLS للبث المباشر
-        - ANDROID يعطي itag=18 (فيديو 360p مدمج بالصوت) للفيديو وكبديل فوري للصوت
-        """
         now = time.time()
         cached = self._meta_cache.get(vid)
         if cached and cached[1] > now and f"{vid}:a" in self._url_cache and f"{vid}:v" in self._url_cache:
@@ -337,27 +327,8 @@ class YouTubeAPI:
         self._inflight_player[vid] = fut
 
         try:
-            if not self._visitor_data:
+            if not self._visitor_data or (now - self._visitor_data_ts) >= 3600:
                 await self._ensure_visitor_data()
-
-            vision_task = self._request_innertube_client(
-                vid,
-                client_payload={
-                    "clientName": "VISIONOS",
-                    "clientVersion": "1.02",
-                    "deviceMake": "Apple",
-                    "deviceModel": "RealityDevice17,1",
-                    "osName": "visionOS",
-                    "osVersion": "26.5.23O471",
-                    "hl": "ar",
-                    "gl": "EG",
-                    "timeZone": "UTC",
-                    "utcOffsetMinutes": 0,
-                },
-                client_id="101",
-                client_ver="1.02",
-                user_agent=VISIONOS_UA,
-            )
 
             android_task = self._request_innertube_client(
                 vid,
@@ -367,8 +338,8 @@ class YouTubeAPI:
                     "androidSdkVersion": 30,
                     "osName": "Android",
                     "osVersion": "11",
-                    "hl": "ar",
-                    "gl": "EG",
+                    "hl": "en",
+                    "gl": "US",
                     "timeZone": "UTC",
                     "utcOffsetMinutes": 0,
                 },
@@ -377,7 +348,30 @@ class YouTubeAPI:
                 user_agent=ANDROID_UA,
             )
 
-            vision_data, android_data = await asyncio.gather(vision_task, android_task)
+            # عدم ارسال طلب VISIONOS ابدا الا اذا توفر visitorData لمنع حظر السيرفر
+            if self._visitor_data:
+                vision_task = self._request_innertube_client(
+                    vid,
+                    client_payload={
+                        "clientName": "VISIONOS",
+                        "clientVersion": "1.02",
+                        "deviceMake": "Apple",
+                        "deviceModel": "RealityDevice17,1",
+                        "osName": "visionOS",
+                        "osVersion": "26.5.23O471",
+                        "hl": "en",
+                        "gl": "US",
+                        "timeZone": "UTC",
+                        "utcOffsetMinutes": 0,
+                    },
+                    client_id="101",
+                    client_ver="1.02",
+                    user_agent=VISIONOS_UA,
+                )
+                vision_data, android_data = await asyncio.gather(vision_task, android_task)
+            else:
+                vision_data = None
+                android_data = await android_task
 
             vd = (
                 (vision_data or {}).get("videoDetails")
@@ -406,7 +400,6 @@ class YouTubeAPI:
             vision_sd = (vision_data or {}).get("streamingData") or {}
             android_sd = (android_data or {}).get("streamingData") or {}
 
-            # 1. استخراج رابط الصوت النقي itag=140 من VISIONOS مع اختيار المسار الأصلي (منع الدبلجة الإنجليزية التلقائية)
             vision_audio_url: str | None = None
             vision_audio_fmt: dict[str, Any] = {}
             best_audio_score = -999
@@ -437,7 +430,6 @@ class YouTubeAPI:
                         vision_audio_url = f_url
                         vision_audio_fmt = fmt
 
-            # 2. استخراج رابط itag=18 من ANDROID (للفيديو وكبديل مضمون 100% للصوت)
             prog_stream_url: str | None = None
             prog_fmt: dict[str, Any] = {}
             for sd_source in (android_sd, vision_sd):
@@ -879,7 +871,6 @@ class YouTubeAPI:
         if cached and cached[1] > now:
             return (cached[0], True) if wants_tuple else cached[0]
 
-        # 1. المسار الصاروخي عبر Innertube JSON (~50ms بدون كوكيز)
         if len(vid) == 11:
             await self._innertube_player(vid)
             cached = self._url_cache.get(cache_key)
@@ -893,10 +884,10 @@ class YouTubeAPI:
         else:
             media_format = "bestaudio[ext=m4a][language_preference>=10]/140/18/bestaudio[ext=m4a]/bestaudio/best"
 
-        # 2. المسار الاحتياطي السريع عبر yt-dlp (android + visionos فقط — 174ms)
         opts = {**self.fast_opts, "cookiefile": None, "format": media_format}
         if self._visitor_data:
             yt_args = dict(opts["extractor_args"]["youtube"])
+            yt_args["player_client"] = ["visionos", "android"]
             yt_args["visitor_data"] = [self._visitor_data]
             opts["extractor_args"] = {"youtube": yt_args}
 
@@ -909,8 +900,12 @@ class YouTubeAPI:
         except Exception as e:
             log.debug(f"Primary yt-dlp fallback triggered for {target_url}: {e}")
 
-        # 3. المسار الاحتياطي الثاني بدون كوكيز
         fb_opts = {**self.fallback_opts, "cookiefile": None, "format": media_format}
+        if self._visitor_data:
+            yt_args = dict(fb_opts["extractor_args"]["youtube"])
+            yt_args["visitor_data"] = [self._visitor_data]
+            fb_opts["extractor_args"] = {"youtube": yt_args}
+
         try:
             info = await self._extract_native(target_url, fb_opts)
             direct_url = info.get("url") if info else None
@@ -928,7 +923,6 @@ class YouTubeAPI:
             return None
         self.invalidate_cache(vid)
 
-        # جلب رابط ANDROID itag=18 مباشرة في 70ms
         android_data = await self._request_innertube_client(
             vid,
             client_payload={
@@ -937,8 +931,8 @@ class YouTubeAPI:
                 "androidSdkVersion": 30,
                 "osName": "Android",
                 "osVersion": "11",
-                "hl": "ar",
-                "gl": "EG",
+                "hl": "en",
+                "gl": "US",
             },
             client_id="3",
             client_ver="21.26.364",
