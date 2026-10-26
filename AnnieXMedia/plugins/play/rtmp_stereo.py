@@ -16,7 +16,7 @@ from config import BANNED_USERS
 from AnnieXMedia import YouTube, app
 from AnnieXMedia.core.call import StreamController
 from AnnieXMedia.utils.database import get_assistant
-from AnnieXMedia.utils.decorators import AdminRightsCheck
+from AnnieXMedia.utils.decorators import AdminRightsCheck, AdminActual
 
 ANDROID_UA = "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip"
 VISIONOS_UA = (
@@ -376,14 +376,16 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
 
 # ==========================================================
 # 1. أمر فتح مكالمة الـ RTMP (يدعم افتح استيريو / افتح ستيريو)
+#    ✅ AdminActual (بدون فحص is_active_chat)
 # ==========================================================
 @app.on_message(
     filters.regex(r"^[/!.]?(افتح استيريو|افتح ستيريو|فتح استيريو|فتح ستيريو|rtmpon)$")
     & filters.group
     & ~BANNED_USERS
 )
-@AdminRightsCheck
-async def open_rtmp_call_cmd(client, message: Message, _, chat_id: int):
+@AdminActual
+async def open_rtmp_call_cmd(client, message: Message, _):
+    chat_id = message.chat.id
     mystic = await message.reply_text("**جاري فتح مكالمة الـ Stereo...**")
     async with _get_lock(chat_id):
         try:
@@ -404,14 +406,16 @@ async def open_rtmp_call_cmd(client, message: Message, _, chat_id: int):
 
 # ==========================================================
 # 2. أمر قفل مكالمة الـ RTMP نهائياً
+#    ✅ AdminActual (بدون فحص is_active_chat)
 # ==========================================================
 @app.on_message(
     filters.regex(r"^[/!.]?(اقفل استيريو|اقفل ستيريو|قفل استيريو|قفل ستيريو|rtmpoff)$")
     & filters.group
     & ~BANNED_USERS
 )
-@AdminRightsCheck
-async def close_rtmp_call_cmd(client, message: Message, _, chat_id: int):
+@AdminActual
+async def close_rtmp_call_cmd(client, message: Message, _):
+    chat_id = message.chat.id
     async with _get_lock(chat_id):
         await _discard_call(chat_id)
         await message.reply_text("**تم ايقاف البث واغلاق مكالمة الـ Stereo بالكامل.**")
@@ -419,6 +423,7 @@ async def close_rtmp_call_cmd(client, message: Message, _, chat_id: int):
 
 # ==========================================================
 # 3. أوامر التحكم النصية (ايقاف / توقف / كمل / تخطي / قدم / رجع)
+#    ✅ AdminRightsCheck (محتاجة مكالمة شغالة فعلاً)
 # ==========================================================
 @app.on_message(
     filters.regex(
@@ -491,6 +496,7 @@ async def control_rtmp_text_cmd(client, message: Message, _, chat_id: int):
 
 # ==========================================================
 # 4. أمر التشغيل الرئيسي (يدعم استيريو / ستيريو / فيديو استيريو / فيديو ستيريو)
+#    ✅ AdminRightsCheck
 # ==========================================================
 @app.on_message(
     filters.regex(r"^[/!.]?(فيديو استيريو|فيديو ستيريو|بث فيديو|vrtmp|استيريو|ستيريو|بث|rtmp)(?:\s+(.+))?$")
@@ -590,6 +596,7 @@ async def play_rtmp_stereo_cmd(client, message: Message, _, chat_id: int):
 
 # ==========================================================
 # 5. معالج أزرار التحكم التفاعلية (Inline Buttons)
+#    ✅ AdminRightsCheck
 # ==========================================================
 @app.on_callback_query(filters.regex(r"^rtmp_ctl\|") & ~BANNED_USERS)
 @AdminRightsCheck
