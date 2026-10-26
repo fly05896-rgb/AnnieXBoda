@@ -674,4 +674,190 @@ async def play_rtmp_stereo_cmd(client, message: Message, _, chat_id: int):
     raw_text = (message.text or "").strip().lstrip("/!.")
     for ignored in (
         "افتح استيريو", "افتح ستيريو", "فتح استيريو", "فتح ستيريو",
-        "اقفل استيريو", "اقفل ستيريو", "قفل استيريو",
+        "اقفل استيريو", "اقفل ستيريو", "قفل استيريو", "قفل ستيريو",
+        "ايقاف استيريو", "ايقاف ستيريو", "توقف استيريو", "توقف ستيريو",
+        "كمل استيريو", "كمل ستيريو", "تخطي استيريو", "تخطي ستيريو",
+    ):
+        if raw_text.startswith(ignored):
+            return
+
+    m = re.match(r"^(فيديو استيريو|فيديو ستيريو|بث فيديو|vrtmp|استيريو|ستيريو|بث|rtmp)(?:\s+(.+))?$", raw_text, flags=re.I)
+    if not m:
+        return
+
+    cmd_word = m.group(1).lower()
+    query = (m.group(2) or "").strip()
+    is_video = cmd_word in ("فيديو استيريو", "فيديو ستيريو", "بث فيديو", "vrtmp")
+
+    if not query and message.reply_to_message:
+        query = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
+
+    if not query:
+        return await message.reply_text(
+            "**الاستخدام:**\n"
+            "- صوت: `استيريو اسم الاغنية`\n"
+            "- فيديو: `فيديو استيريو اسم الاغنية`\n"
+            "- فتح: `افتح استيريو`\n"
+            "- قفل: `اقفل استيريو`"
+        )
+
+    _log("info", chat_id, f"أمر تشغيل: '{query}' | is_video={is_video}")
+    mystic = await message.reply_text("**جاري البحث والتشغيل...**")
+
+    async with _get_lock(chat_id):
+        try:
+            _log("info", chat_id, f"بحث YouTube عن '{query}'")
+            details, vid_id = await YouTube.track(query)
+            if not details or not vid_id or details.get("title") == "Unknown":
+                _log("warning", chat_id, f"لا نتيجة لـ '{query}'")
+                return await mystic.edit_text("**لم يتم العثور على النتيجة.**")
+
+            title = details.get("title", "Unknown")
+            duration_min = details.get("duration_min", "0:00")
+            duration_sec = int(details.get("duration_sec") or _parse_dur_to_sec(duration_min))
+            _log("info", chat_id, f"نتيجة: {vid_id} | {title[:40]} | {duration_min}")
+
+            track_item = {
+                "vid_id": vid_id, "title": title,
+                "duration_min": duration_min, "duration_sec": duration_sec,
+                "is_video": is_video, "by": message.from_user.mention,
+            }
+
+            queue = _rtmp_queues.setdefault(chat_id, [])
+            is_playing = chat_id in _rtmp_procs and _rtmp_procs[chat_id].returncode is None
+
+            if is_playing:
+                queue.append(track_item)
+                pos = len(queue) - 1
+                _log("info", chat_id, f"أضيف للطابور #{pos}")
+                return await mystic.edit_text(
+                    f"**تمت الاضافة للطابور في المركز #{pos}**\n\n"
+                    f"**العنوان :** `{title[:45]}`\n"
+                    f"**المدة :** `{duration_min}`\n"
+                    f"**بواسطة :** {message.from_user.mention}"
+                )
+
+            queue.clear()
+            queue.append(track_item)
+            await _start_track(chat_id, track_item, seek_seconds=0)
+
+            mode_label = "فيديو + Stereo 320kbps" if is_video else "صوت Stereo 320kbps"
+            photo_src = track_item.get("cover_path") or f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
+
+            await mystic.delete()
+            await message.reply_photo(
+                photo=photo_src,
+                caption=(
+                    f"**تم بدء بث الـ Stereo**\n\n"
+                    f"**العنوان :** `{title[:45]}`\n"
+                    f"**المدة :** `{duration_min}`\n"
+                    f"**الوضع :** `{mode_label}`\n"
+                    f"**بواسطة :** {message.from_user.mention}"
+                ),
+                reply_markup=_rtmp_buttons(chat_id, paused=False),
+            )
+        except ChatAdminRequired:
+            _log("error", chat_id, "ChatAdminRequired في التشغيل")
+            await mystic.edit_text("**ارفع الحساب المساعد مشرفاً بصلاحية إدارة المحادثات الصوتية.**")
+        except Exception as e:
+            _log("error", chat_id, f"فشل التشغيل: {type(e).__name__}: {e}")
+            await mystic.edit_text(f"**خطأ:** `{type(e).__name__}: {e}`")
+
+
+# ==========================================================
+# 5. الأزرار التفاعلية
+# ==========================================================
+@app.on_callback_query(filters.regex(r"^rtmp_ctl\|") & ~BANNED_USERS)
+@RTMPCheck
+async def rtmp_buttons_cb(client, callback_query: CallbackQuery, _, chat_id: int):
+    parts = callback_query.data.split("|")
+    action = parts[1]
+    _log("info", chat_id, f"زر: {action}")
+
+    async with _get_lock(chat_id):
+        st = _rtmp_state.get(chat_id)
+
+        if action == "close":
+            await callback_query.answer("جاري قفل الكول...")
+            await _discard_call(chat_id)
+            with suppress(Exception):
+                await callback_query.message.edit_caption(
+                    f"**تم ايقاف البث وقفل الكول بواسطة :** {callback_query.from_user.mention}"
+                )
+            return
+
+        if not st:
+            return await callback_query.answer("لا يوجد بث نشط حالياً.", show_alert=True)
+
+        if action == "stop":
+            await callback_query.answer("تم ايقاف البث.")
+            await _kill_proc(chat_id)
+            _rtmp_queues.pop(chat_id, None)
+            _rtmp_state.pop(chat_id, None)
+            with suppress(Exception):
+                await callback_query.message.edit_caption(
+                    f"**تم ايقاف البث بواسطة :** {callback_query.from_user.mention}"
+                )
+            return
+
+        if action == "pause":
+            st["offset"] = _get_played_seconds(chat_id)
+            st["paused"] = True
+            _log("info", chat_id, f"إيقاف مؤقت (زر) عند {st['offset']}s")
+            await _kill_proc(chat_id)
+            await callback_query.answer(f"تم التوقف عند {_sec_to_str(st['offset'])}")
+            with suppress(Exception):
+                await callback_query.message.edit_reply_markup(reply_markup=_rtmp_buttons(chat_id, paused=True))
+            return
+
+        if action == "resume":
+            await callback_query.answer("جاري الاستئناف...")
+            _log("info", chat_id, f"استئناف (زر) من {st.get('offset')}s")
+            await _start_track(chat_id, st["track"], seek_seconds=int(st.get("offset", 0)))
+            with suppress(Exception):
+                await callback_query.message.edit_reply_markup(reply_markup=_rtmp_buttons(chat_id, paused=False))
+            return
+
+        if action in ("rew15", "fwd15"):
+            cur = _get_played_seconds(chat_id)
+            new_pos = max(0, cur - 15) if action == "rew15" else (cur + 15)
+            dur = st["track"].get("duration_sec", 0)
+            if dur > 0 and new_pos >= dur - 5:
+                return await callback_query.answer("نهاية الاغنية.", show_alert=True)
+            _log("info", chat_id, f"قفز (زر) إلى {new_pos}s")
+            await callback_query.answer(f"الانتقال الى {_sec_to_str(new_pos)}")
+            await _start_track(chat_id, st["track"], seek_seconds=new_pos)
+            with suppress(Exception):
+                await callback_query.message.edit_reply_markup(reply_markup=_rtmp_buttons(chat_id, paused=False))
+            return
+
+        if action == "skip":
+            _log("info", chat_id, "تخطي (زر)")
+            queue = _rtmp_queues.get(chat_id) or []
+            if queue:
+                queue.pop(0)
+            if not queue:
+                await callback_query.answer("تم التخطي، الطابور فارغ.")
+                await _kill_proc(chat_id)
+                _rtmp_state.pop(chat_id, None)
+                with suppress(Exception):
+                    await callback_query.message.edit_caption(
+                        f"**تم تخطي الاغنية وانتهاء الطابور بواسطة :** {callback_query.from_user.mention}"
+                    )
+                return
+            next_track = queue[0]
+            await callback_query.answer("جاري تشغيل التالي...")
+            await _start_track(chat_id, next_track, seek_seconds=0)
+            with suppress(Exception):
+                await callback_query.message.delete()
+            await app.send_photo(
+                chat_id,
+                photo=next_track.get("cover_path") or f"https://i.ytimg.com/vi/{next_track['vid_id']}/hqdefault.jpg",
+                caption=(
+                    f"**تم التخطي وتشغيل التالي**\n\n"
+                    f"**العنوان :** `{next_track['title'][:45]}`\n"
+                    f"**المدة :** `{next_track['duration_min']}`\n"
+                    f"**بواسطة :** {next_track['by']}"
+                ),
+                reply_markup=_rtmp_buttons(chat_id, paused=False),
+            )
