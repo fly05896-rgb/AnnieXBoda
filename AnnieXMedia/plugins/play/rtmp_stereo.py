@@ -1,7 +1,3 @@
-# Authored By Certified Coders © 2026
-# File Path: AnnieXMedia/plugins/play/rtmp_stereo.py
-# System: Fast Telegram RTMP Hi-Fi Stereo (320kbps 48kHz) Engine with Queue, Seek, Pause, Skip & Stop
-
 import asyncio
 import os
 import random
