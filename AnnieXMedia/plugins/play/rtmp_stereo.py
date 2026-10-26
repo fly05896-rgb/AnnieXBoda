@@ -32,7 +32,7 @@ if not LOGGER.handlers:
         logging.Formatter("[%(asctime)s] [%(levelname)s] [rtmp] %(message)s", datefmt="%H:%M:%S")
     )
     LOGGER.addHandler(_handler)
-    LOGGER.propagate = False  # منع التكرار مع لوج البوت العام
+    LOGGER.propagate = False
 
 ANDROID_UA = "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip"
 VISIONOS_UA = (
@@ -49,19 +49,14 @@ _rtmp_locks: Dict[int, asyncio.Lock] = {}
 _rtmp_url_cache: Dict[int, str] = {}
 _rtmp_queues: Dict[int, List[Dict[str, Any]]] = {}
 _rtmp_state: Dict[int, Dict[str, Any]] = {}
-# آخر 40 سطر من stderr لكل شات (للوج عند الانهيار)
 _rtmp_stderr: Dict[int, deque] = {}
 
 
 def _log(level: str, chat_id: int, msg: str) -> None:
-    """دالة موحدة للوج مع chat_id."""
     tag = f"[chat={chat_id}]"
     getattr(LOGGER, level)(f"{tag} {msg}")
 
 
-# ==========================================================
-# ديكوريتور مخصص للـ RTMP
-# ==========================================================
 def RTMPCheck(mystic):
     async def wrapper(client, update):
         is_cb = isinstance(update, CallbackQuery)
@@ -170,12 +165,8 @@ def _rtmp_buttons(chat_id: int, paused: bool = False) -> InlineKeyboardMarkup:
     )
 
 
-# ==========================================================
-# إنهاء آمن مع تسجيل
-# ==========================================================
 async def _kill_proc(chat_id: int) -> None:
     _log("info", chat_id, "بدء إنهاء العملية الحالية")
-
     task = _rtmp_tasks.pop(chat_id, None)
     if task and not task.done():
         _log("info", chat_id, "إلغاء task المراقبة")
@@ -237,6 +228,25 @@ async def _ensure_assistant(chat_id: int):
     return ub
 
 
+# ═══════════════════════════════════════════════════════════
+# 🔇 إلغاء كتم الحساب المساعد (السبب الأول لعدم وصول الصوت)
+# ═══════════════════════════════════════════════════════════
+async def _unmute_assistant(ub, chat_id: int, input_call) -> None:
+    """يُلغي كتم الحساب المساعد داخل المكالمة إن كان مكتومًا."""
+    try:
+        self_peer = await ub.resolve_peer("me")
+        await ub.invoke(
+            raw.functions.phone.EditGroupCallParticipant(
+                call=input_call,
+                participant=self_peer,
+                muted=False,
+            )
+        )
+        _log("info", chat_id, "تم إلغاء كتم الحساب المساعد (muted=False)")
+    except Exception as e:
+        _log("warning", chat_id, f"فشل إلغاء كتم الحساب المساعد: {type(e).__name__}: {e}")
+
+
 async def _ensure_rtmp_call(chat_id: int, force_recreate: bool = False, title: str = "Hi-Fi Stereo") -> str:
     _log("info", chat_id, f"تأمين مكالمة RTMP (force={force_recreate})")
 
@@ -278,6 +288,17 @@ async def _ensure_rtmp_call(chat_id: int, force_recreate: bool = False, title: s
         )
         _log("info", chat_id, "تم إنشاء المكالمة")
 
+        # نعيد جلب المكالمة للحصول على InputGroupCall الصحيح
+        await asyncio.sleep(1.0)  # مهلة قصيرة لاستقرار المكالمة
+        full_chat = await ub.invoke(raw.functions.channels.GetFullChannel(channel=peer))
+        active_call = full_chat.full_chat.call
+        if not active_call:
+            _log("error", chat_id, "لم يتم العثور على المكالمة بعد الإنشاء")
+            raise RuntimeError("فشل في العثور على المكالمة بعد إنشائها.")
+
+    # 🔇 إلغاء الكتم — خطوة حاسمة لوصول الصوت
+    await _unmute_assistant(ub, chat_id, active_call)
+
     _rtmp_url_cache[chat_id] = rtmp_full_url
     return rtmp_full_url
 
@@ -304,9 +325,9 @@ async def _discard_call(chat_id: int) -> bool:
     return False
 
 
-# ==========================================================
-# بناء أمر ffmpeg
-# ==========================================================
+# ═══════════════════════════════════════════════════════════
+# 🎧 بناء أمر ffmpeg مع ترويسة AAC صحيحة
+# ═══════════════════════════════════════════════════════════
 def _build_ffmpeg_cmd(
     media_url: str,
     rtmp_url: str,
@@ -322,13 +343,14 @@ def _build_ffmpeg_cmd(
         "volume=1.5"
     )
 
+    # 🔑 flvflags: إجبار ffmpeg على كتابة AAC sequence header داخل FLV
     stability_args = [
         "-nostdin",
         "-probesize", "5000000",
         "-analyzeduration", "5000000",
         "-max_delay", "500000",
         "-buffer_size", "1000000",
-        "-flvflags", "no_duration_filesize",
+        "-flvflags", "+aac_seq_header_detect+no_duration_filesize",
         "-f", "flv",
         str(rtmp_url),
     ]
@@ -355,7 +377,8 @@ def _build_ffmpeg_cmd(
             "-b:v", "200k", "-maxrate", "200k", "-bufsize", "400k",
             "-r", "15", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
             "-af", audio_filter,
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-c:a", "aac", "-profile:a", "aac_low", "-strict", "experimental",
+            "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-shortest",
             *stability_args,
         ]
@@ -374,16 +397,13 @@ def _build_ffmpeg_cmd(
         "-b:v", "500k", "-maxrate", "500k", "-bufsize", "1000k",
         "-r", "25", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
         "-af", audio_filter,
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-c:a", "aac", "-profile:a", "aac_low", "-strict", "experimental",
+        "-b:a", "192k", "-ar", "48000", "-ac", "2",
         *stability_args,
     ]
 
 
-# ==========================================================
-# قراءة stderr من ffmpeg وتسجيله
-# ==========================================================
 async def _drain_stderr(chat_id: int, proc: asyncio.subprocess.Process) -> None:
-    """يقرأ stderr سطراً بسطر ويحفظ آخر 40 سطر في الذاكرة."""
     buf = _rtmp_stderr.setdefault(chat_id, deque(maxlen=40))
     try:
         while True:
@@ -394,7 +414,6 @@ async def _drain_stderr(chat_id: int, proc: asyncio.subprocess.Process) -> None:
             if not decoded:
                 continue
             buf.append(decoded)
-            # نطبع كل تحذير/خطأ فوراً على مستوى اللوج
             low = decoded.lower()
             if "error" in low or "fail" in low or "invalid" in low or "no such" in low:
                 _log("error", chat_id, f"ffmpeg: {decoded}")
@@ -450,7 +469,7 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,  # ← بدل DEVNULL لالتقاط الأخطاء
+        stderr=asyncio.subprocess.PIPE,
     )
     _log("info", chat_id, f"ffmpeg بدأ pid={proc.pid}")
     _rtmp_procs[chat_id] = proc
@@ -462,7 +481,6 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
     }
     _rtmp_stderr[chat_id] = deque(maxlen=40)
 
-    # مهمة قراءة stderr
     stderr_task = asyncio.create_task(_drain_stderr(chat_id, proc))
 
     async def _runner(cid: int, p: asyncio.subprocess.Process):
@@ -477,7 +495,6 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
             cid,
             f"ffmpeg انتهى rc={rc} بعد {dur:.1f}s",
         )
-        # لو خرج بسرعة، أظهر آخر رسائل stderr تلقائياً
         if rc != 0 and (time.time() - t0) < 5:
             buf = _rtmp_stderr.get(cid) or []
             _log("error", cid, f"آخر {len(buf)} سطر من ffmpeg قبل الانهيار:")
