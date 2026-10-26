@@ -1,3 +1,7 @@
+# Authored By Certified Coders 2026
+# File Path: AnnieXMedia/plugins/play/rtmp_stereo.py
+# System: Standalone Native Telegram RTMP Stereo (320kbps 48kHz) Engine (Zero Conflict Edition)
+
 import asyncio
 import logging
 import os
@@ -14,16 +18,24 @@ from pyrogram.errors import ChatAdminRequired, UserNotParticipant
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import config
-from config import BANNED_USERS
+from config import BANNED_USERS, adminlist
 from AnnieXMedia import YouTube, app
-from AnnieXMedia.core.call import StreamController
-from AnnieXMedia.utils.database import get_assistant, get_lang, is_maintenance
-from AnnieXMedia.misc import SUDOERS
+from AnnieXMedia.misc import SUDOERS, db
+from AnnieXMedia.utils.database import (
+    add_active_chat,
+    get_assistant,
+    get_authuser_names,
+    get_lang,
+    is_maintenance,
+    is_nonadmin_chat,
+    music_off,
+    music_on,
+    remove_active_chat,
+    remove_active_video_chat,
+)
+from AnnieXMedia.utils.formatters import int_to_alpha
 from strings import get_string
 
-# ═══════════════════════════════════════════════════════════
-# إعداد اللوج
-# ═══════════════════════════════════════════════════════════
 LOGGER = logging.getLogger("rtmp_stereo")
 if not LOGGER.handlers:
     LOGGER.setLevel(logging.INFO)
@@ -43,18 +55,53 @@ VISIONOS_UA = (
 COVER_DIR = "/dev/shm/rtmp_covers" if os.path.exists("/dev/shm") else "/tmp/rtmp_covers"
 os.makedirs(COVER_DIR, exist_ok=True)
 
+# مجموعة أولوية عالية (-2) مع stop_propagation لمنع تداخل أوامر البوت العادية
+RTMP_GROUP = -2
+
 _rtmp_procs: Dict[int, asyncio.subprocess.Process] = {}
 _rtmp_tasks: Dict[int, asyncio.Task] = {}
 _rtmp_locks: Dict[int, asyncio.Lock] = {}
 _rtmp_url_cache: Dict[int, str] = {}
+_rtmp_call_ready: Dict[int, bool] = {}
 _rtmp_queues: Dict[int, List[Dict[str, Any]]] = {}
 _rtmp_state: Dict[int, Dict[str, Any]] = {}
 _rtmp_stderr: Dict[int, deque] = {}
 
 
 def _log(level: str, chat_id: int, msg: str) -> None:
-    tag = f"[chat={chat_id}]"
-    getattr(LOGGER, level)(f"{tag} {msg}")
+    getattr(LOGGER, level)(f"[chat={chat_id}] {msg}")
+
+
+def is_rtmp_active(chat_id: int) -> bool:
+    """فحص ما إذا كان الجروب في وضع بث RTMP نشط أو متوقف مؤقتاً"""
+    if chat_id in _rtmp_state:
+        return True
+    proc = _rtmp_procs.get(chat_id)
+    return bool(proc and proc.returncode is None)
+
+
+async def _has_rtmp_permission(chat_id: int, user_id: int) -> bool:
+    """فحص موحد للصلاحيات يشمل المطورين، وضع الجميع، المشرفين، والأدمنية المرفوعين بالبوت"""
+    if user_id in SUDOERS:
+        return True
+    if await is_nonadmin_chat(chat_id):
+        return True
+    cached_admins = adminlist.get(chat_id)
+    if cached_admins and user_id in cached_admins:
+        return True
+    with suppress(Exception):
+        token = await int_to_alpha(user_id)
+        auth_names = await get_authuser_names(chat_id)
+        if token in auth_names:
+            return True
+    with suppress(Exception):
+        member = await app.get_chat_member(chat_id, user_id)
+        if member.status == enums.ChatMemberStatus.OWNER:
+            return True
+        if member.status == enums.ChatMemberStatus.ADMINISTRATOR:
+            if not member.privileges or member.privileges.can_manage_video_chats:
+                return True
+    return False
 
 
 def RTMPCheck(mystic):
@@ -63,52 +110,47 @@ def RTMPCheck(mystic):
         msg = update.message if is_cb else update
         user = update.from_user
 
-        if await is_maintenance() is False:
-            if user.id not in SUDOERS:
-                txt = "البوت في وضع الصيانة حالياً."
-                if is_cb:
-                    return await update.answer(txt, show_alert=True)
-                return await msg.reply_text(txt)
+        if not user and not is_cb and msg.sender_chat:
+            txt = "عذرا، انت تكتب بصفتك قناة او مشرف متخفي. اظهر حسابك الشخصي."
+            await msg.reply_text(txt)
+            return await msg.stop_propagation()
+
+        if not user:
+            return
+
+        if await is_maintenance() is False and user.id not in SUDOERS:
+            txt = "البوت في وضع الصيانة حاليا."
+            if is_cb:
+                return await update.answer(txt, show_alert=True)
+            await msg.reply_text(txt)
+            return await msg.stop_propagation()
+
+        chat_id = msg.chat.id
+        if is_cb:
+            with suppress(Exception):
+                chat_id = int(update.data.split("|")[-1])
+
+        if not await _has_rtmp_permission(chat_id, user.id):
+            txt = "تحتاج صلاحية ادارة المحادثات الصوتية او رفع ادمن في البوت لتنفيذ هذا الامر."
+            if is_cb:
+                return await update.answer(txt, show_alert=True)
+            await msg.reply_text(txt)
+            return await msg.stop_propagation()
 
         if not is_cb:
             with suppress(Exception):
                 await msg.delete()
 
-        if not is_cb and msg.sender_chat:
-            return await msg.reply_text(
-                "عذراً، أنت تكتب بصفتك قناة أو مشرف متخفي. أظهر حسابك الشخصي."
-            )
-
-        if user.id not in SUDOERS:
-            try:
-                member = await app.get_chat_member(msg.chat.id, user.id)
-                priv = member.privileges
-                if not priv or not priv.can_manage_video_chats:
-                    txt = "تحتاج صلاحية (إدارة المحادثات الصوتية) لتنفيذ هذا الأمر."
-                    if is_cb:
-                        return await update.answer(txt, show_alert=True)
-                    return await msg.reply_text(txt)
-            except Exception as e:
-                _log("warning", msg.chat.id, f"فشل التحقق من صلاحيات {user.id}: {e}")
-                txt = "خطأ في التحقق من صلاحياتك."
-                if is_cb:
-                    return await update.answer(txt, show_alert=True)
-                return await msg.reply_text(txt)
-
-        chat_id = msg.chat.id
-        if is_cb:
-            try:
-                chat_id = int(update.data.split("|")[-1])
-            except Exception:
-                pass
-
         try:
             language = await get_lang(chat_id)
             _ = get_string(language)
         except Exception:
-            _ = get_string("en")
+            _ = get_string("ar")
 
-        return await mystic(client, update, _, chat_id)
+        await mystic(client, update, _, chat_id)
+        if not is_cb:
+            await msg.stop_propagation()
+
     return wrapper
 
 
@@ -166,29 +208,47 @@ def _rtmp_buttons(chat_id: int, paused: bool = False) -> InlineKeyboardMarkup:
 
 
 async def _kill_proc(chat_id: int) -> None:
-    _log("info", chat_id, "بدء إنهاء العملية الحالية")
     task = _rtmp_tasks.pop(chat_id, None)
     if task and not task.done():
-        _log("info", chat_id, "إلغاء task المراقبة")
         task.cancel()
-        with suppress(asyncio.CancelledError):
+        with suppress(asyncio.CancelledError, Exception):
             await task
 
     proc = _rtmp_procs.pop(chat_id, None)
     if proc and proc.returncode is None:
-        _log("info", chat_id, f"إنهاء ffmpeg pid={proc.pid}")
         with suppress(Exception):
             proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
-                _log("info", chat_id, "انتهت العملية بسلام")
             except asyncio.TimeoutError:
-                _log("warning", chat_id, "ffmpeg لم يستجب، جاري kill()")
                 proc.kill()
                 await proc.wait()
-                _log("info", chat_id, "تم قتل العملية")
+
+
+async def _sync_rtmp_clear(chat_id: int) -> None:
+    """تنظيف حالة البث عند التوقف مع عدم المساس ببث PyTgCalls العادي ان وجد"""
+    from AnnieXMedia.core.call import StreamController
+
+    _rtmp_queues.pop(chat_id, None)
+    _rtmp_state.pop(chat_id, None)
+    _rtmp_stderr.pop(chat_id, None)
+    if chat_id not in StreamController.active_calls:
+        db[chat_id] = []
+        with suppress(Exception):
+            await remove_active_video_chat(chat_id)
+            await remove_active_chat(chat_id)
+            await music_off(chat_id)
+
+
+async def stop_rtmp_if_active(chat_id: int, discard_call: bool = True) -> None:
+    """دالة مساعدة يستدعيها البوت العادي (call.py) قبل بدء مكالمة عادية لمنع التداخل"""
+    if not is_rtmp_active(chat_id) and not _rtmp_call_ready.get(chat_id):
+        return
+    if discard_call:
+        await _discard_call(chat_id)
     else:
-        _log("info", chat_id, "لا توجد عملية نشطة لإنهائها")
+        await _kill_proc(chat_id)
+        await _sync_rtmp_clear(chat_id)
 
 
 async def _fetch_raw_yt_cover(vid_id: str) -> str | None:
@@ -203,66 +263,45 @@ async def _fetch_raw_yt_cover(vid_id: str) -> str | None:
                 async with aiofiles.open(path, "wb") as f:
                     await f.write(await resp.read())
                 return path
-            LOGGER.warning(f"[cover] فشل تحميل غلاف {vid_id}: HTTP {resp.status}")
     except Exception as e:
-        LOGGER.warning(f"[cover] خطأ تحميل غلاف {vid_id}: {e}")
+        _log("warning", 0, f"فشل تحميل غلاف {vid_id}: {e}")
     return None
 
 
 async def _ensure_assistant(chat_id: int):
-    _log("info", chat_id, "التحقق من الحساب المساعد")
     ub = await get_assistant(chat_id)
     try:
         member = await app.get_chat_member(chat_id, ub.id)
         if member.status in (enums.ChatMemberStatus.BANNED, enums.ChatMemberStatus.RESTRICTED):
-            _log("error", chat_id, f"الحساب المساعد {ub.id} محظور/مقيد")
-            raise RuntimeError("الحساب المساعد محظور أو مقيد في هذا الجروب.")
+            raise RuntimeError("الحساب المساعد محظور او مقيد في هذا الجروب.")
     except UserNotParticipant:
-        _log("warning", chat_id, "الحساب المساعد غير موجود، جاري دعوته")
         invitelink = await app.export_chat_invite_link(chat_id)
         if invitelink.startswith("https://t.me/+"):
             invitelink = invitelink.replace("https://t.me/+", "https://t.me/joinchat/")
         await ub.join_chat(invitelink)
-        _log("info", chat_id, "تم ضم الحساب المساعد")
     await ub.resolve_peer(chat_id)
     return ub
 
 
-# ═══════════════════════════════════════════════════════════
-# 🔇 إلغاء كتم الحساب المساعد (السبب الأول لعدم وصول الصوت)
-# ═══════════════════════════════════════════════════════════
-async def _unmute_assistant(ub, chat_id: int, input_call) -> None:
-    """يُلغي كتم الحساب المساعد داخل المكالمة إن كان مكتومًا."""
-    try:
-        self_peer = await ub.resolve_peer("me")
-        await ub.invoke(
-            raw.functions.phone.EditGroupCallParticipant(
-                call=input_call,
-                participant=self_peer,
-                muted=False,
-            )
-        )
-        _log("info", chat_id, "تم إلغاء كتم الحساب المساعد (muted=False)")
-    except Exception as e:
-        _log("warning", chat_id, f"فشل إلغاء كتم الحساب المساعد: {type(e).__name__}: {e}")
-
-
 async def _ensure_rtmp_call(chat_id: int, force_recreate: bool = False, title: str = "Hi-Fi Stereo") -> str:
-    _log("info", chat_id, f"تأمين مكالمة RTMP (force={force_recreate})")
+    """
+    تأمين مكالمة RTMP حقيقية (rtmp_stream=True):
+    اذا كانت هناك مكالمة عادية مفتوحة مسبقا في الجروب، يتم اغلاقها واعادة فتحها كـ RTMP
+    لان المكالمة العادية ترفض استقبال الصوت من FFmpeg RTMP.
+    """
+    from AnnieXMedia.core.call import StreamController
 
     if chat_id in StreamController.active_calls:
-        _log("info", chat_id, "إيقاف بث PyTgCalls المتعارض")
         with suppress(Exception):
             await StreamController.stop_stream(chat_id)
+        force_recreate = True
 
-    if not force_recreate and chat_id in _rtmp_url_cache:
-        _log("info", chat_id, "استخدام RTMP URL من الكاش")
+    if not force_recreate and _rtmp_call_ready.get(chat_id) and chat_id in _rtmp_url_cache:
         return _rtmp_url_cache[chat_id]
 
     ub = await _ensure_assistant(chat_id)
     peer = await ub.resolve_peer(chat_id)
 
-    _log("info", chat_id, "طلب GetGroupCallStreamRtmpUrl و GetFullChannel")
     rtmp_info, full_chat = await asyncio.gather(
         ub.invoke(raw.functions.phone.GetGroupCallStreamRtmpUrl(peer=peer, revoke=False)),
         ub.invoke(raw.functions.channels.GetFullChannel(channel=peer)),
@@ -270,14 +309,16 @@ async def _ensure_rtmp_call(chat_id: int, force_recreate: bool = False, title: s
     rtmp_full_url = f"{rtmp_info.url}{rtmp_info.key}"
     active_call = full_chat.full_chat.call
 
-    if active_call and force_recreate:
-        _log("info", chat_id, "حذف المكالمة القديمة")
+    # اذا لم تكن المكالمة مسجلة لدينا كـ RTMP جاهزة، نغلق اي مكالمة عادية قديمة وننشئ مكالمة RTMP
+    need_new_rtmp = force_recreate or not _rtmp_call_ready.get(chat_id) or not active_call
+
+    if active_call and need_new_rtmp:
         with suppress(Exception):
             await ub.invoke(raw.functions.phone.DiscardGroupCall(call=active_call))
+        await asyncio.sleep(0.4)
         active_call = None
 
     if not active_call:
-        _log("info", chat_id, "إنشاء مكالمة RTMP جديدة")
         await ub.invoke(
             raw.functions.phone.CreateGroupCall(
                 peer=peer,
@@ -286,48 +327,45 @@ async def _ensure_rtmp_call(chat_id: int, force_recreate: bool = False, title: s
                 title=title[:32],
             )
         )
-        _log("info", chat_id, "تم إنشاء المكالمة")
-
-        # نعيد جلب المكالمة للحصول على InputGroupCall الصحيح
-        await asyncio.sleep(1.0)  # مهلة قصيرة لاستقرار المكالمة
-        full_chat = await ub.invoke(raw.functions.channels.GetFullChannel(channel=peer))
-        active_call = full_chat.full_chat.call
-        if not active_call:
-            _log("error", chat_id, "لم يتم العثور على المكالمة بعد الإنشاء")
-            raise RuntimeError("فشل في العثور على المكالمة بعد إنشائها.")
-
-    # 🔇 إلغاء الكتم — خطوة حاسمة لوصول الصوت
-    await _unmute_assistant(ub, chat_id, active_call)
+        await asyncio.sleep(0.4)
 
     _rtmp_url_cache[chat_id] = rtmp_full_url
+    _rtmp_call_ready[chat_id] = True
     return rtmp_full_url
 
 
 async def _discard_call(chat_id: int) -> bool:
-    _log("info", chat_id, "بدء حذف/قفل مكالمة RTMP")
     await _kill_proc(chat_id)
-    _rtmp_queues.pop(chat_id, None)
-    _rtmp_state.pop(chat_id, None)
+    await _sync_rtmp_clear(chat_id)
     _rtmp_url_cache.pop(chat_id, None)
-    _rtmp_stderr.pop(chat_id, None)
+    _rtmp_call_ready.pop(chat_id, None)
     try:
         ub = await get_assistant(chat_id)
         peer = await ub.resolve_peer(chat_id)
         full_chat = await ub.invoke(raw.functions.channels.GetFullChannel(channel=peer))
         if full_chat.full_chat.call:
-            _log("info", chat_id, "استدعاء DiscardGroupCall")
             await ub.invoke(raw.functions.phone.DiscardGroupCall(call=full_chat.full_chat.call))
-            _log("info", chat_id, "تم قفل المكالمة بنجاح")
             return True
-        _log("info", chat_id, "لا توجد مكالمة لقفلها")
     except Exception as e:
-        _log("error", chat_id, f"فشل قفل المكالمة: {type(e).__name__}: {e}")
+        _log("error", chat_id, f"فشل قفل المكالمة: {e}")
     return False
 
 
-# ═══════════════════════════════════════════════════════════
-# 🎧 بناء أمر ffmpeg مع ترويسة AAC صحيحة
-# ═══════════════════════════════════════════════════════════
+async def _resolve_rtmp_stream_url(vid_id: str, is_video: bool, prefer_progressive: bool = False) -> str | None:
+    """
+    استخراج رابط البث لـ FFmpeg:
+    - في المحاولة الاولى للصوت: يستخدم رابط الكاش السريع (VISIONOS itag=140 او ANDROID itag=18).
+    - عند اعادة المحاولة (prefer_progressive=True): يجبر استخراج ANDROID itag=18 المدمج والمضمون 100%.
+    """
+    if prefer_progressive:
+        recovered = await YouTube.recover_stream(vid_id, videoid=vid_id, video=True)
+        if recovered:
+            return recovered
+    if is_video:
+        return await YouTube.download(vid_id, None, video=True, videoid=f"{vid_id}_v")
+    return await YouTube.download(vid_id, None, video=False, videoid=vid_id)
+
+
 def _build_ffmpeg_cmd(
     media_url: str,
     rtmp_url: str,
@@ -340,73 +378,66 @@ def _build_ffmpeg_cmd(
 
     audio_filter = (
         "aresample=osr=48000:ochl=stereo:async=1000:first_pts=0,"
-        "volume=1.5"
+        "volume=1.4"
     )
-
-    # 🔑 flvflags: إجبار ffmpeg على كتابة AAC sequence header داخل FLV
-    stability_args = [
-        "-nostdin",
-        "-probesize", "5000000",
-        "-analyzeduration", "5000000",
-        "-max_delay", "500000",
-        "-buffer_size", "1000000",
-        "-flvflags", "+aac_seq_header_detect+no_duration_filesize",
-        "-f", "flv",
-        str(rtmp_url),
-    ]
 
     if not is_video:
         if cover_path and os.path.exists(cover_path):
-            video_input = ["-re", "-loop", "1", "-framerate", "15", "-i", str(cover_path)]
+            video_input = ["-loop", "1", "-framerate", "15", "-i", str(cover_path)]
+            vf_chain = "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
         else:
-            video_input = ["-re", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=15"]
+            video_input = ["-f", "lavfi", "-i", "color=c=black:s=640x360:r=15"]
+            vf_chain = "format=yuv420p"
 
         return [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
             "-fflags", "+genpts+igndts",
             *video_input,
+            "-re",
             "-thread_queue_size", "4096",
             "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
             "-user_agent", ua,
             *seek_args,
             "-i", str(media_url),
             "-map", "0:v:0", "-map", "1:a:0",
-            "-vf", "scale=640:360,format=yuv420p",
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-profile:v", "baseline",
-            "-b:v", "200k", "-maxrate", "200k", "-bufsize", "400k",
+            "-vf", vf_chain,
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+            "-profile:v", "baseline", "-pix_fmt", "yuv420p",
+            "-b:v", "250k", "-maxrate", "250k", "-bufsize", "500k",
             "-r", "15", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
             "-af", audio_filter,
-            "-c:a", "aac", "-profile:a", "aac_low", "-strict", "experimental",
-            "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-ac", "2",
             "-shortest",
-            *stability_args,
+            "-flvflags", "no_duration_filesize",
+            "-f", "flv", str(rtmp_url),
         ]
 
     return [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
-        "-fflags", "+genpts+igndts", "-re",
+        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
+        "-fflags", "+genpts+igndts",
+        "-re",
         "-thread_queue_size", "4096",
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
         "-user_agent", ua,
         *seek_args,
         "-i", str(media_url),
+        "-map", "0:v:0", "-map", "0:a:0",
         "-vf", "scale=640:360,format=yuv420p",
         "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-        "-profile:v", "baseline",
-        "-b:v", "500k", "-maxrate", "500k", "-bufsize", "1000k",
+        "-profile:v", "baseline", "-pix_fmt", "yuv420p",
+        "-b:v", "650k", "-maxrate", "650k", "-bufsize", "1300k",
         "-r", "25", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
         "-af", audio_filter,
-        "-c:a", "aac", "-profile:a", "aac_low", "-strict", "experimental",
-        "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        *stability_args,
+        "-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-ac", "2",
+        "-flvflags", "no_duration_filesize",
+        "-f", "flv", str(rtmp_url),
     ]
 
 
 async def _drain_stderr(chat_id: int, proc: asyncio.subprocess.Process) -> None:
     buf = _rtmp_stderr.setdefault(chat_id, deque(maxlen=40))
     try:
-        while True:
+        while proc.stderr:
             line = await proc.stderr.readline()
             if not line:
                 break
@@ -415,44 +446,30 @@ async def _drain_stderr(chat_id: int, proc: asyncio.subprocess.Process) -> None:
                 continue
             buf.append(decoded)
             low = decoded.lower()
-            if "error" in low or "fail" in low or "invalid" in low or "no such" in low:
+            if "error" in low or "fail" in low or "invalid" in low:
                 _log("error", chat_id, f"ffmpeg: {decoded}")
-            elif "warning" in low or "deprecated" in low:
-                _log("warning", chat_id, f"ffmpeg: {decoded}")
-            else:
-                _log("debug", chat_id, f"ffmpeg: {decoded}")
     except asyncio.CancelledError:
         raise
-    except Exception as e:
-        _log("warning", chat_id, f"خطأ في قراءة stderr: {e}")
+    except Exception:
+        pass
 
 
 async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 0) -> None:
-    _log("info", chat_id, f"بدء تشغيل مقطع: {track.get('vid_id')} | seek={seek_seconds}")
     await _kill_proc(chat_id)
 
     vid_id = track["vid_id"]
     is_video = track["is_video"]
 
-    if is_video:
-        _log("info", chat_id, "تحميل رابط فيديو + غلاف + RTMP")
-        media_url, cover_path, rtmp_url = await asyncio.gather(
-            YouTube.download(vid_id, None, video=True, videoid=f"{vid_id}_v"),
-            _fetch_raw_yt_cover(vid_id),
-            _ensure_rtmp_call(chat_id, force_recreate=False, title=track["title"]),
-        )
-    else:
-        _log("info", chat_id, "تحميل رابط صوت + غلاف + RTMP")
-        media_url, cover_path, rtmp_url = await asyncio.gather(
-            YouTube.download(vid_id, None, video=False, videoid=vid_id),
-            _fetch_raw_yt_cover(vid_id),
-            _ensure_rtmp_call(chat_id, force_recreate=False, title=track["title"]),
-        )
+    media_url, cover_path, rtmp_url = await asyncio.gather(
+        _resolve_rtmp_stream_url(vid_id, is_video=is_video, prefer_progressive=False),
+        _fetch_raw_yt_cover(vid_id),
+        _ensure_rtmp_call(chat_id, force_recreate=False, title=track["title"]),
+    )
 
     if not media_url:
-        _log("error", chat_id, "media_url فارغ — فشل استخراج رابط البث")
+        media_url = await _resolve_rtmp_stream_url(vid_id, is_video=is_video, prefer_progressive=True)
+    if not media_url:
         raise RuntimeError("فشل استخراج رابط البث المباشر.")
-    _log("info", chat_id, f"media_url جاهز (len={len(media_url)}), غلاف={bool(cover_path)}")
 
     track["media_url"] = media_url
     track["cover_path"] = cover_path
@@ -464,14 +481,12 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
         cover_path=cover_path,
         seek_seconds=seek_seconds,
     )
-    _log("debug", chat_id, f"ffmpeg cmd: {' '.join(cmd)}")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    _log("info", chat_id, f"ffmpeg بدأ pid={proc.pid}")
     _rtmp_procs[chat_id] = proc
     _rtmp_state[chat_id] = {
         "track": track,
@@ -481,35 +496,45 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
     }
     _rtmp_stderr[chat_id] = deque(maxlen=40)
 
-    stderr_task = asyncio.create_task(_drain_stderr(chat_id, proc))
+    # تسجيل الجروب كمحادثة نشطة حتى لا ترفض ديكوريتورات البوت الاوامر، مع وضع seconds=0 لمنع تداخل seeker.py
+    await add_active_chat(chat_id)
+    await music_on(chat_id)
+    db[chat_id] = [
+        {
+            "title": track["title"],
+            "dur": track["duration_min"],
+            "streamtype": "video" if is_video else "audio",
+            "by": track["by"],
+            "user_id": track.get("user_id", 0),
+            "chat_id": chat_id,
+            "file": f"rtmp_{vid_id}",
+            "vidid": vid_id,
+            "seconds": 0,
+            "played": seek_seconds,
+        }
+    ]
+
+    asyncio.create_task(_drain_stderr(chat_id, proc))
 
     async def _runner(cid: int, p: asyncio.subprocess.Process):
         t0 = time.time()
         with suppress(Exception):
             await p.wait()
 
-        rc = p.returncode
-        dur = time.time() - t0
-        _log(
-            "info" if rc == 0 else "warning",
-            cid,
-            f"ffmpeg انتهى rc={rc} بعد {dur:.1f}s",
-        )
-        if rc != 0 and (time.time() - t0) < 5:
-            buf = _rtmp_stderr.get(cid) or []
-            _log("error", cid, f"آخر {len(buf)} سطر من ffmpeg قبل الانهيار:")
-            for ln in list(buf)[-15:]:
-                _log("error", cid, f"  ├─ {ln}")
-
         if _rtmp_procs.get(cid) is not p:
-            _log("info", cid, "عملية أخرى أصبحت الحالية — تجاهل")
             return
-        if (time.time() - t0) < 1.5 and not _rtmp_state.get(cid, {}).get("paused"):
-            _log("warning", cid, "خروج مبكر <1.5s — إعادة إنشاء RTMP والمحاولة")
+
+        # في حال اغلق FFmpeg مبكرا (<3 ثوان) بسبب مكالمة عادية او رابط صوت مقيد، نعيد انشاء RTMP بـ itag=18 المضمون
+        if (time.time() - t0) < 3.0 and not _rtmp_state.get(cid, {}).get("paused"):
+            _log("warning", cid, "خروج مبكر لـ ffmpeg — جاري اعادة انشاء مكالمة RTMP واستخدام رابط ANDROID itag=18")
             with suppress(Exception):
-                new_rtmp = await _ensure_rtmp_call(cid, force_recreate=True, title=track["title"])
+                fallback_url, new_rtmp = await asyncio.gather(
+                    _resolve_rtmp_stream_url(vid_id, is_video=is_video, prefer_progressive=True),
+                    _ensure_rtmp_call(cid, force_recreate=True, title=track["title"]),
+                )
+                use_url = fallback_url or media_url
                 retry_cmd = _build_ffmpeg_cmd(
-                    media_url=media_url,
+                    media_url=use_url,
                     rtmp_url=new_rtmp,
                     is_video=is_video,
                     cover_path=cover_path,
@@ -520,9 +545,9 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                _log("info", cid, f"إعادة تشغيل ffmpeg pid={p2.pid}")
                 _rtmp_procs[cid] = p2
-                _rtmp_state[cid]["start_ts"] = time.time()
+                if cid in _rtmp_state:
+                    _rtmp_state[cid]["start_ts"] = time.time()
                 asyncio.create_task(_drain_stderr(cid, p2))
                 await p2.wait()
                 if _rtmp_procs.get(cid) is not p2:
@@ -534,7 +559,6 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
             queue.pop(0)
         if queue:
             next_track = queue[0]
-            _log("info", cid, f"الانتقال للمقطع التالي: {next_track.get('vid_id')}")
             with suppress(Exception):
                 await _start_track(cid, next_track, seek_seconds=0)
                 await app.send_photo(
@@ -549,8 +573,7 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
                     reply_markup=_rtmp_buttons(cid, paused=False),
                 )
         else:
-            _log("info", cid, "الطابور فارغ — إيقاف الحالة")
-            _rtmp_state.pop(cid, None)
+            await _sync_rtmp_clear(cid)
 
     _rtmp_tasks[chat_id] = asyncio.create_task(_runner(chat_id, proc))
 
@@ -560,28 +583,25 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
 # ==========================================================
 @app.on_message(
     filters.regex(r"^[/!.]?(افتح استيريو|افتح ستيريو|فتح استيريو|فتح ستيريو|rtmpon)$")
-    & filters.group & ~BANNED_USERS
+    & filters.group & ~BANNED_USERS,
+    group=RTMP_GROUP,
 )
 @RTMPCheck
 async def open_rtmp_call_cmd(client, message: Message, _, chat_id: int):
-    _log("info", chat_id, "أمر: فتح مكالمة RTMP")
     mystic = await message.reply_text("**جاري فتح مكالمة الـ Stereo...**")
     async with _get_lock(chat_id):
         try:
             await _ensure_rtmp_call(chat_id, force_recreate=True)
-            _log("info", chat_id, "تم فتح المكالمة بنجاح")
             await mystic.edit_text(
                 "**تم فتح مكالمة الـ Stereo بنجاح.**\n"
                 "- صوت: `استيريو + اسم الاغنية`\n"
                 "- فيديو: `فيديو استيريو + اسم الاغنية`\n"
-                "- توقف/استئناف: `توقف استيريو` / `كمل استيريو`\n"
-                "- قفل: `اقفل استيريو`"
+                "- تحكم: `توقف` / `كمل` / `تخطي` / `مرر 15` / `رجع 15` / `ايقاف`\n"
+                "- قفل الكول: `اقفل استيريو`"
             )
         except ChatAdminRequired:
-            _log("error", chat_id, "ChatAdminRequired — البوت ليس مشرفاً")
-            await mystic.edit_text("**ارفع الحساب المساعد مشرفاً بصلاحية إدارة المحادثات الصوتية.**")
+            await mystic.edit_text("**ارفع الحساب المساعد مشرفا بصلاحية ادارة المحادثات الصوتية.**")
         except Exception as e:
-            _log("error", chat_id, f"فشل فتح المكالمة: {type(e).__name__}: {e}")
             await mystic.edit_text(f"**خطأ:** `{type(e).__name__}: {e}`")
 
 
@@ -590,67 +610,85 @@ async def open_rtmp_call_cmd(client, message: Message, _, chat_id: int):
 # ==========================================================
 @app.on_message(
     filters.regex(r"^[/!.]?(اقفل استيريو|اقفل ستيريو|قفل استيريو|قفل ستيريو|rtmpoff)$")
-    & filters.group & ~BANNED_USERS
+    & filters.group & ~BANNED_USERS,
+    group=RTMP_GROUP,
 )
 @RTMPCheck
 async def close_rtmp_call_cmd(client, message: Message, _, chat_id: int):
-    _log("info", chat_id, "أمر: قفل مكالمة RTMP")
     async with _get_lock(chat_id):
         await _discard_call(chat_id)
         await message.reply_text("**تم ايقاف البث واغلاق مكالمة الـ Stereo بالكامل.**")
 
 
 # ==========================================================
-# 3. التحكم النصي
+# 3. التحكم النصي المباشر والمختصر (بدون تداخل مع ملفات admins)
 # ==========================================================
-@app.on_message(
-    filters.regex(
-        r"^[/!.]?(ايقاف استيريو|ايقاف ستيريو|اسكت استيريو|توقف استيريو|توقف ستيريو|كمل استيريو|كمل ستيريو|تخطي استيريو|تخطي ستيريو|التالي استيريو|(?:قدم|مرر|رجع)\s+(?:استيريو|ستيريو)\s+\d+)"
-    )
-    & filters.group & ~BANNED_USERS
-)
+def _rtmp_control_filter(_, __, message: Message) -> bool:
+    text = (message.text or "").strip().lstrip("/!.")
+    if not text:
+        return False
+    # 1. اوامر تحتوي على كلمة استيريو / ستيريو صراحة
+    if re.match(
+        r"^(ايقاف|اسكت|انهاء|وقف|استوب|توقف|وقف مؤقت|توقيف مؤقت|كمل|استئناف|تابع|تخطي|التالي)\s+(?:استيريو|ستيريو)$",
+        text,
+    ):
+        return True
+    if re.match(r"^(قدم|مرر|رجع)\s+(?:استيريو|ستيريو)\s+\d+$", text):
+        return True
+    # 2. اذا كان بث الاستيريو نشطا في هذا الجروب، نلتقط الاوامر المختصرة (تخطي، اسكت، استوب، كمل، مرر 15) قبل admins
+    if message.chat and is_rtmp_active(message.chat.id):
+        if re.match(
+            r"^(ايقاف|اسكت|انهاء|وقف|استوب|end|stop|توقف|وقف مؤقت|توقيف مؤقت|pause|كمل|استئناف|تابع|resume|تخطي|التالي|skip|next)$",
+            text,
+            flags=re.I,
+        ):
+            return True
+        if re.match(r"^(قدم|مرر|رجع|seek|seekback)\s+\d+$", text, flags=re.I):
+            return True
+    return False
+
+
+rtmp_ctl_filter = filters.create(_rtmp_control_filter, name="RTMPControlFilter")
+
+
+@app.on_message(rtmp_ctl_filter & filters.group & ~BANNED_USERS, group=RTMP_GROUP)
 @RTMPCheck
 async def control_rtmp_text_cmd(client, message: Message, _, chat_id: int):
     text = (message.text or "").strip().lstrip("/!.")
-    _log("info", chat_id, f"أمر تحكم: {text}")
     async with _get_lock(chat_id):
         st = _rtmp_state.get(chat_id)
         if not st:
-            _log("warning", chat_id, "لا توجد حالة RTMP نشطة")
-            return await message.reply_text("**لا يوجد بث Stereo نشط حالياً.**")
+            return await message.reply_text("**لا يوجد بث Stereo نشط حاليا.**")
 
-        if text.startswith(("ايقاف", "اسكت")):
-            _log("info", chat_id, "تنفيذ: إيقاف")
+        low = text.lower()
+
+        if low.startswith(("ايقاف", "انهاء", "استوب", "end", "stop")) or low in ("وقف", "وقف استيريو", "وقف ستيريو"):
             await _kill_proc(chat_id)
-            _rtmp_queues.pop(chat_id, None)
-            _rtmp_state.pop(chat_id, None)
-            return await message.reply_text("**تم ايقاف البث وتفريغ الطابور.**")
+            await _sync_rtmp_clear(chat_id)
+            return await message.reply_text("**تم ايقاف بث الـ Stereo وتفريغ الطابور.**")
 
-        if text.startswith("توقف"):
+        if low.startswith(("توقف", "وقف مؤقت", "توقيف مؤقت", "اسكت", "pause")):
             if st.get("paused"):
-                return await message.reply_text("**البث متوقف مؤقتاً بالفعل.**")
+                return await message.reply_text("**البث متوقف مؤقتا بالفعل.**")
             st["offset"] = _get_played_seconds(chat_id)
             st["paused"] = True
-            _log("info", chat_id, f"إيقاف مؤقت عند {st['offset']}s")
+            await music_off(chat_id)
             await _kill_proc(chat_id)
             return await message.reply_text(f"**تم الايقاف المؤقت عند {_sec_to_str(st['offset'])}.**")
 
-        if text.startswith("كمل"):
+        if low.startswith(("كمل", "استئناف", "تابع", "resume")):
             if not st.get("paused"):
                 return await message.reply_text("**البث يعمل بالفعل.**")
-            _log("info", chat_id, f"استئناف من {st.get('offset')}s")
             await _start_track(chat_id, st["track"], seek_seconds=int(st.get("offset", 0)))
             return await message.reply_text(f"**تم الاستئناف من {_sec_to_str(st['offset'])}.**")
 
-        if text.startswith(("تخطي", "التالي")):
-            _log("info", chat_id, "تنفيذ: تخطي")
+        if low.startswith(("تخطي", "التالي", "skip", "next")):
             queue = _rtmp_queues.get(chat_id) or []
             if queue:
                 queue.pop(0)
             if not queue:
                 await _kill_proc(chat_id)
-                _rtmp_state.pop(chat_id, None)
-                _log("info", chat_id, "تخطي — الطابور فارغ")
+                await _sync_rtmp_clear(chat_id)
                 return await message.reply_text("**تم التخطي، الطابور فارغ.**")
             next_track = queue[0]
             await _start_track(chat_id, next_track, seek_seconds=0)
@@ -665,16 +703,15 @@ async def control_rtmp_text_cmd(client, message: Message, _, chat_id: int):
                 reply_markup=_rtmp_buttons(chat_id, paused=False),
             )
 
-        m = re.match(r"^(قدم|مرر|رجع)\s+(?:استيريو|ستيريو)\s+(\d+)$", text)
+        m = re.match(r"^(قدم|مرر|رجع|seek|seekback)(?:\s+(?:استيريو|ستيريو))?\s+(\d+)$", low)
         if m:
             action, sec_str = m.group(1), m.group(2)
             delta = int(sec_str)
             cur = _get_played_seconds(chat_id)
-            new_pos = max(0, cur - delta) if action == "رجع" else (cur + delta)
+            new_pos = max(0, cur - delta) if action in ("رجع", "seekback") else (cur + delta)
             dur = st["track"].get("duration_sec", 0)
             if dur > 0 and new_pos >= dur - 5:
-                return await message.reply_text("**الوقت يتجاوز مدة الاغنية.**")
-            _log("info", chat_id, f"قفز إلى {new_pos}s")
+                return await message.reply_text("**الوقت المطلوب يتجاوز مدة الاغنية.**")
             await _start_track(chat_id, st["track"], seek_seconds=new_pos)
             return await message.reply_text(f"**تم الانتقال الى {_sec_to_str(new_pos)}.**")
 
@@ -684,7 +721,8 @@ async def control_rtmp_text_cmd(client, message: Message, _, chat_id: int):
 # ==========================================================
 @app.on_message(
     filters.regex(r"^[/!.]?(فيديو استيريو|فيديو ستيريو|بث فيديو|vrtmp|استيريو|ستيريو|بث|rtmp)(?:\s+(.+))?$")
-    & filters.group & ~BANNED_USERS
+    & filters.group & ~BANNED_USERS,
+    group=RTMP_GROUP,
 )
 @RTMPCheck
 async def play_rtmp_stereo_cmd(client, message: Message, _, chat_id: int):
@@ -694,6 +732,7 @@ async def play_rtmp_stereo_cmd(client, message: Message, _, chat_id: int):
         "اقفل استيريو", "اقفل ستيريو", "قفل استيريو", "قفل ستيريو",
         "ايقاف استيريو", "ايقاف ستيريو", "توقف استيريو", "توقف ستيريو",
         "كمل استيريو", "كمل ستيريو", "تخطي استيريو", "تخطي ستيريو",
+        "اسكت استيريو", "اسكت ستيريو", "انهاء استيريو", "استوب استيريو",
     ):
         if raw_text.startswith(ignored):
             return
@@ -718,26 +757,26 @@ async def play_rtmp_stereo_cmd(client, message: Message, _, chat_id: int):
             "- قفل: `اقفل استيريو`"
         )
 
-    _log("info", chat_id, f"أمر تشغيل: '{query}' | is_video={is_video}")
     mystic = await message.reply_text("**جاري البحث والتشغيل...**")
 
     async with _get_lock(chat_id):
         try:
-            _log("info", chat_id, f"بحث YouTube عن '{query}'")
             details, vid_id = await YouTube.track(query)
             if not details or not vid_id or details.get("title") == "Unknown":
-                _log("warning", chat_id, f"لا نتيجة لـ '{query}'")
                 return await mystic.edit_text("**لم يتم العثور على النتيجة.**")
 
             title = details.get("title", "Unknown")
             duration_min = details.get("duration_min", "0:00")
             duration_sec = int(details.get("duration_sec") or _parse_dur_to_sec(duration_min))
-            _log("info", chat_id, f"نتيجة: {vid_id} | {title[:40]} | {duration_min}")
 
             track_item = {
-                "vid_id": vid_id, "title": title,
-                "duration_min": duration_min, "duration_sec": duration_sec,
-                "is_video": is_video, "by": message.from_user.mention,
+                "vid_id": vid_id,
+                "title": title,
+                "duration_min": duration_min,
+                "duration_sec": duration_sec,
+                "is_video": is_video,
+                "by": message.from_user.mention,
+                "user_id": message.from_user.id,
             }
 
             queue = _rtmp_queues.setdefault(chat_id, [])
@@ -746,7 +785,6 @@ async def play_rtmp_stereo_cmd(client, message: Message, _, chat_id: int):
             if is_playing:
                 queue.append(track_item)
                 pos = len(queue) - 1
-                _log("info", chat_id, f"أضيف للطابور #{pos}")
                 return await mystic.edit_text(
                     f"**تمت الاضافة للطابور في المركز #{pos}**\n\n"
                     f"**العنوان :** `{title[:45]}`\n"
@@ -774,22 +812,19 @@ async def play_rtmp_stereo_cmd(client, message: Message, _, chat_id: int):
                 reply_markup=_rtmp_buttons(chat_id, paused=False),
             )
         except ChatAdminRequired:
-            _log("error", chat_id, "ChatAdminRequired في التشغيل")
-            await mystic.edit_text("**ارفع الحساب المساعد مشرفاً بصلاحية إدارة المحادثات الصوتية.**")
+            await mystic.edit_text("**ارفع الحساب المساعد مشرفا بصلاحية ادارة المحادثات الصوتية.**")
         except Exception as e:
-            _log("error", chat_id, f"فشل التشغيل: {type(e).__name__}: {e}")
             await mystic.edit_text(f"**خطأ:** `{type(e).__name__}: {e}`")
 
 
 # ==========================================================
 # 5. الأزرار التفاعلية
 # ==========================================================
-@app.on_callback_query(filters.regex(r"^rtmp_ctl\|") & ~BANNED_USERS)
+@app.on_callback_query(filters.regex(r"^rtmp_ctl\|") & ~BANNED_USERS, group=RTMP_GROUP)
 @RTMPCheck
 async def rtmp_buttons_cb(client, callback_query: CallbackQuery, _, chat_id: int):
     parts = callback_query.data.split("|")
     action = parts[1]
-    _log("info", chat_id, f"زر: {action}")
 
     async with _get_lock(chat_id):
         st = _rtmp_state.get(chat_id)
@@ -804,13 +839,12 @@ async def rtmp_buttons_cb(client, callback_query: CallbackQuery, _, chat_id: int
             return
 
         if not st:
-            return await callback_query.answer("لا يوجد بث نشط حالياً.", show_alert=True)
+            return await callback_query.answer("لا يوجد بث نشط حاليا.", show_alert=True)
 
         if action == "stop":
             await callback_query.answer("تم ايقاف البث.")
             await _kill_proc(chat_id)
-            _rtmp_queues.pop(chat_id, None)
-            _rtmp_state.pop(chat_id, None)
+            await _sync_rtmp_clear(chat_id)
             with suppress(Exception):
                 await callback_query.message.edit_caption(
                     f"**تم ايقاف البث بواسطة :** {callback_query.from_user.mention}"
@@ -820,7 +854,7 @@ async def rtmp_buttons_cb(client, callback_query: CallbackQuery, _, chat_id: int
         if action == "pause":
             st["offset"] = _get_played_seconds(chat_id)
             st["paused"] = True
-            _log("info", chat_id, f"إيقاف مؤقت (زر) عند {st['offset']}s")
+            await music_off(chat_id)
             await _kill_proc(chat_id)
             await callback_query.answer(f"تم التوقف عند {_sec_to_str(st['offset'])}")
             with suppress(Exception):
@@ -829,7 +863,6 @@ async def rtmp_buttons_cb(client, callback_query: CallbackQuery, _, chat_id: int
 
         if action == "resume":
             await callback_query.answer("جاري الاستئناف...")
-            _log("info", chat_id, f"استئناف (زر) من {st.get('offset')}s")
             await _start_track(chat_id, st["track"], seek_seconds=int(st.get("offset", 0)))
             with suppress(Exception):
                 await callback_query.message.edit_reply_markup(reply_markup=_rtmp_buttons(chat_id, paused=False))
@@ -841,7 +874,6 @@ async def rtmp_buttons_cb(client, callback_query: CallbackQuery, _, chat_id: int
             dur = st["track"].get("duration_sec", 0)
             if dur > 0 and new_pos >= dur - 5:
                 return await callback_query.answer("نهاية الاغنية.", show_alert=True)
-            _log("info", chat_id, f"قفز (زر) إلى {new_pos}s")
             await callback_query.answer(f"الانتقال الى {_sec_to_str(new_pos)}")
             await _start_track(chat_id, st["track"], seek_seconds=new_pos)
             with suppress(Exception):
@@ -849,14 +881,13 @@ async def rtmp_buttons_cb(client, callback_query: CallbackQuery, _, chat_id: int
             return
 
         if action == "skip":
-            _log("info", chat_id, "تخطي (زر)")
             queue = _rtmp_queues.get(chat_id) or []
             if queue:
                 queue.pop(0)
             if not queue:
                 await callback_query.answer("تم التخطي، الطابور فارغ.")
                 await _kill_proc(chat_id)
-                _rtmp_state.pop(chat_id, None)
+                await _sync_rtmp_clear(chat_id)
                 with suppress(Exception):
                     await callback_query.message.edit_caption(
                         f"**تم تخطي الاغنية وانتهاء الطابور بواسطة :** {callback_query.from_user.mention}"
