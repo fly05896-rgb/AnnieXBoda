@@ -1,6 +1,4 @@
-# Authored By Certified Coders 2026
 # File Path: AnnieXMedia/platforms/Youtube.py
-# System: Ultra-Fast Cookie-Free YouTube Engine (Anti-Ban VISIONOS + ANDROID Parallel + yt-dlp 2026.10.21)
 
 import asyncio
 import json
@@ -123,7 +121,7 @@ class YouTubeAPI:
             "cachedir": cache_dir,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android"],
+                    "player_client": ["android", "visionos"],
                     "player_skip": ["webpage", "configs", "initial_data", "js"],
                     "skip": ["dash", "translated_subs"],
                     "fetch_pot": ["never"],
@@ -147,7 +145,7 @@ class YouTubeAPI:
             "cachedir": cache_dir,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android", "visionos"],
+                    "player_client": ["visionos", "android"],
                     "player_skip": ["webpage", "initial_data"],
                     "skip": ["translated_subs"],
                     "fetch_pot": ["never"],
@@ -302,7 +300,7 @@ class YouTubeAPI:
                 raw_bytes = await resp.read()
                 data = _json_loads(raw_bytes)
                 v_data = (data.get("responseContext") or {}).get("visitorData")
-                if v_data:
+                if v_data and not self._visitor_data:
                     self._visitor_data = str(v_data)
                     self._visitor_data_ts = time.time()
                 return data
@@ -327,8 +325,26 @@ class YouTubeAPI:
         self._inflight_player[vid] = fut
 
         try:
-            if not self._visitor_data or (now - self._visitor_data_ts) >= 3600:
+            if not self._visitor_data:
                 await self._ensure_visitor_data()
+
+            vision_task = self._request_innertube_client(
+                vid,
+                client_payload={
+                    "clientName": "VISIONOS",
+                    "clientVersion": "1.02",
+                    "deviceMake": "Apple",
+                    "deviceModel": "RealityDevice17,1",
+                    "osName": "visionOS",
+                    "osVersion": "26.5.23O471",
+                    "hl": "en",
+                    "timeZone": "UTC",
+                    "utcOffsetMinutes": 0,
+                },
+                client_id="101",
+                client_ver="1.02",
+                user_agent=VISIONOS_UA,
+            )
 
             android_task = self._request_innertube_client(
                 vid,
@@ -339,7 +355,6 @@ class YouTubeAPI:
                     "osName": "Android",
                     "osVersion": "11",
                     "hl": "en",
-                    "gl": "US",
                     "timeZone": "UTC",
                     "utcOffsetMinutes": 0,
                 },
@@ -348,30 +363,7 @@ class YouTubeAPI:
                 user_agent=ANDROID_UA,
             )
 
-            # عدم ارسال طلب VISIONOS ابدا الا اذا توفر visitorData لمنع حظر السيرفر
-            if self._visitor_data:
-                vision_task = self._request_innertube_client(
-                    vid,
-                    client_payload={
-                        "clientName": "VISIONOS",
-                        "clientVersion": "1.02",
-                        "deviceMake": "Apple",
-                        "deviceModel": "RealityDevice17,1",
-                        "osName": "visionOS",
-                        "osVersion": "26.5.23O471",
-                        "hl": "en",
-                        "gl": "US",
-                        "timeZone": "UTC",
-                        "utcOffsetMinutes": 0,
-                    },
-                    client_id="101",
-                    client_ver="1.02",
-                    user_agent=VISIONOS_UA,
-                )
-                vision_data, android_data = await asyncio.gather(vision_task, android_task)
-            else:
-                vision_data = None
-                android_data = await android_task
+            vision_data, android_data = await asyncio.gather(vision_task, android_task)
 
             vd = (
                 (vision_data or {}).get("videoDetails")
@@ -400,9 +392,9 @@ class YouTubeAPI:
             vision_sd = (vision_data or {}).get("streamingData") or {}
             android_sd = (android_data or {}).get("streamingData") or {}
 
+            # 1. استخراج رابط الصوت النقي itag=140 من VISIONOS مع الغاء الدبلجة التلقائية فقط
             vision_audio_url: str | None = None
             vision_audio_fmt: dict[str, Any] = {}
-            best_audio_score = -999
             for fmt in vision_sd.get("adaptiveFormats", []):
                 f_url = fmt.get("url")
                 if not f_url:
@@ -412,24 +404,14 @@ class YouTubeAPI:
                 if "audio" in mime:
                     at = fmt.get("audioTrack") or {}
                     disp = str(at.get("displayName") or "").lower()
-                    tid = str(at.get("id") or "").lower()
-                    if "descriptive" in disp:
-                        score = -100
-                    elif at.get("isAutoDubbed") or "dubbed" in disp:
-                        score = -50
-                    elif not at or "original" in disp or "أصلي" in disp or tid.startswith("ar"):
-                        score = 100
-                    elif at.get("audioIsDefault"):
-                        score = 40
-                    else:
-                        score = 0
-                    if itag == "140":
-                        score += 20
-                    if score > best_audio_score:
-                        best_audio_score = score
-                        vision_audio_url = f_url
-                        vision_audio_fmt = fmt
+                    if at.get("isAutoDubbed") or "dubbed" in disp or "descriptive" in disp:
+                        continue
+                    vision_audio_url = f_url
+                    vision_audio_fmt = fmt
+                    if itag == "140" and (not at or "original" in disp or at.get("audioIsDefault")):
+                        break
 
+            # 2. استخراج رابط itag=18 من ANDROID
             prog_stream_url: str | None = None
             prog_fmt: dict[str, Any] = {}
             for sd_source in (android_sd, vision_sd):
@@ -882,12 +864,11 @@ class YouTubeAPI:
         elif is_video:
             media_format = "18/22/best[ext=mp4]/best[protocol*=m3u8]/best"
         else:
-            media_format = "bestaudio[ext=m4a][language_preference>=10]/140/18/bestaudio[ext=m4a]/bestaudio/best"
+            media_format = "140/18/bestaudio[ext=m4a]/bestaudio/best"
 
         opts = {**self.fast_opts, "cookiefile": None, "format": media_format}
         if self._visitor_data:
             yt_args = dict(opts["extractor_args"]["youtube"])
-            yt_args["player_client"] = ["visionos", "android"]
             yt_args["visitor_data"] = [self._visitor_data]
             opts["extractor_args"] = {"youtube": yt_args}
 
@@ -901,11 +882,6 @@ class YouTubeAPI:
             log.debug(f"Primary yt-dlp fallback triggered for {target_url}: {e}")
 
         fb_opts = {**self.fallback_opts, "cookiefile": None, "format": media_format}
-        if self._visitor_data:
-            yt_args = dict(fb_opts["extractor_args"]["youtube"])
-            yt_args["visitor_data"] = [self._visitor_data]
-            fb_opts["extractor_args"] = {"youtube": yt_args}
-
         try:
             info = await self._extract_native(target_url, fb_opts)
             direct_url = info.get("url") if info else None
@@ -932,7 +908,6 @@ class YouTubeAPI:
                 "osName": "Android",
                 "osVersion": "11",
                 "hl": "en",
-                "gl": "US",
             },
             client_id="3",
             client_ver="21.26.364",
