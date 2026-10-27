@@ -33,7 +33,8 @@ RUN uv pip install --no-cache \
     orjson \
     ntgcalls \
     py-tgcalls \
-    yt-dlp
+    yt-dlp && \
+    uv pip install --no-cache --reinstall --no-deps "kurigram~=2.2.26"
 
 RUN mkdir -p /etc/yt-dlp && \
     echo "--remote-components ejs:github" > /etc/yt-dlp.conf
