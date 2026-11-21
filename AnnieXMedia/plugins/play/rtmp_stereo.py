@@ -258,16 +258,19 @@ async def _fetch_cover(vid_id: str) -> str | None:
     path = os.path.join(COVER_DIR, f"{vid_id}.jpg")
     if os.path.exists(path) and os.path.getsize(path) > 1000:
         return path
-    url = f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
-    try:
-        session = await YouTube._get_session()
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                async with aiofiles.open(path, "wb") as f:
-                    await f.write(await resp.read())
-                return path
-    except Exception:
-        pass
+    for quality in ("hqdefault.jpg", "mqdefault.jpg"):
+        url = f"https://i.ytimg.com/vi/{vid_id}/{quality}"
+        try:
+            session = await YouTube._get_session()
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    if len(data) > 1000:
+                        async with aiofiles.open(path, "wb") as f:
+                            await f.write(data)
+                        return path
+        except Exception:
+            pass
     return None
 
 
@@ -454,11 +457,11 @@ def _build_ffmpeg_cmd(
 
     if not is_video:
         if cover_path and os.path.exists(cover_path):
-            v_in = ["-thread_queue_size", "4096", "-loop", "1", "-framerate", "25", "-i", str(cover_path)]
-            vf = "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p"
+            v_in = ["-re", "-thread_queue_size", "4096", "-loop", "1", "-framerate", "30", "-i", str(cover_path)]
+            vf = "scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p"
         else:
-            v_in = ["-thread_queue_size", "4096", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=25"]
-            vf = "fps=25,format=yuv420p"
+            v_in = ["-re", "-thread_queue_size", "4096", "-f", "lavfi", "-i", "color=c=black:s=480x270:r=30"]
+            vf = "fps=30,format=yuv420p"
 
         return [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
@@ -470,10 +473,11 @@ def _build_ffmpeg_cmd(
             "-i", str(media_source),
             "-map", "0:v:0", "-map", "1:a:0",
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
-            "-profile:v", "main", "-level", "3.1", "-pix_fmt", "yuv420p", "-bf", "0",
-            "-b:v", "400k", "-maxrate", "500k", "-bufsize", "1000k",
-            "-r", "25", "-g", "25", "-keyint_min", "25", "-sc_threshold", "0",
+            "-c:v", "libx264", "-threads", "2", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-profile:v", "baseline", "-level", "3.1", "-pix_fmt", "yuv420p", "-bf", "0",
+            "-b:v", "350k", "-maxrate", "400k", "-bufsize", "400k",
+            "-r", "30", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+            "-force_key_frames", "expr:gte(t,n_forced*1)",
             "-af", "aresample=async=1:min_hard_comp=0.100000:first_pts=0",
             "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-shortest",
@@ -489,11 +493,12 @@ def _build_ffmpeg_cmd(
         *seek_args,
         "-i", str(media_source),
         "-map", "0:v:0", "-map", "0:a:0",
-        "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p",
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-profile:v", "main", "-level", "3.1", "-pix_fmt", "yuv420p", "-bf", "0",
-        "-b:v", "1000k", "-maxrate", "1200k", "-bufsize", "2400k",
-        "-r", "25", "-g", "25", "-keyint_min", "25", "-sc_threshold", "0",
+        "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p",
+        "-c:v", "libx264", "-threads", "2", "-preset", "ultrafast", "-tune", "zerolatency",
+        "-profile:v", "baseline", "-level", "3.1", "-pix_fmt", "yuv420p", "-bf", "0",
+        "-b:v", "600k", "-maxrate", "700k", "-bufsize", "700k",
+        "-r", "30", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+        "-force_key_frames", "expr:gte(t,n_forced*1)",
         "-af", "aresample=async=1:min_hard_comp=0.100000:first_pts=0",
         "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ar", "48000", "-ac", "2",
         "-flvflags", "no_duration_filesize",
