@@ -1,8 +1,5 @@
 # Authored By Certified Coders © 2026
 
-# --- تفعيل مود الانتظار (هام جداً لملف song.py) ---
-import pyromod.listen
-
 from AnnieXMedia.core.bot import MusicBotClient
 from AnnieXMedia.core.dir import StorageManager
 from AnnieXMedia.core.git import git
