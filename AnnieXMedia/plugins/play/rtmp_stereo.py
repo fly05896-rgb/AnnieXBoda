@@ -9,6 +9,7 @@ from contextlib import suppress
 from typing import Any, Dict, List
 
 import aiofiles
+import aiohttp
 from pyrogram import enums, filters, raw
 from pyrogram.errors import ChatAdminRequired, UserNotParticipant
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -46,15 +47,20 @@ VISIONOS_UA = (
 )
 
 COVER_DIR = "/dev/shm/rtmp_covers" if os.path.exists("/dev/shm") else "/tmp/rtmp_covers"
+MEDIA_DIR = "/dev/shm/rtmp_media" if os.path.exists("/dev/shm") else "/tmp/rtmp_media"
 os.makedirs(COVER_DIR, exist_ok=True)
+os.makedirs(MEDIA_DIR, exist_ok=True)
 
 RTMP_GROUP = -2
+MAX_CACHED_MEDIA_FILES = 12
+MAX_LOCAL_DOWNLOAD_MB = 85
 
 _rtmp_procs: Dict[int, asyncio.subprocess.Process] = {}
 _rtmp_tasks: Dict[int, asyncio.Task] = {}
 _rtmp_locks: Dict[int, asyncio.Lock] = {}
 _rtmp_url_cache: Dict[int, str] = {}
-_rtmp_call_epoch: Dict[int, float] = {}
+_rtmp_call_ready: Dict[int, bool] = {}
+_rtmp_recreating: set[int] = set()
 _rtmp_queues: Dict[int, List[Dict[str, Any]]] = {}
 _rtmp_state: Dict[int, Dict[str, Any]] = {}
 _rtmp_stderr: Dict[int, deque] = {}
@@ -65,6 +71,10 @@ def is_rtmp_active(chat_id: int) -> bool:
         return True
     proc = _rtmp_procs.get(chat_id)
     return bool(proc and proc.returncode is None)
+
+
+def is_rtmp_recreating(chat_id: int) -> bool:
+    return chat_id in _rtmp_recreating
 
 
 async def _has_perm(chat_id: int, user_id: int) -> bool:
@@ -186,6 +196,20 @@ def _rtmp_kb(chat_id: int, paused: bool = False) -> InlineKeyboardMarkup:
     )
 
 
+def _prune_media_cache(keep_path: str | None = None) -> None:
+    with suppress(Exception):
+        files = []
+        for name in os.listdir(MEDIA_DIR):
+            full = os.path.join(MEDIA_DIR, name)
+            if os.path.isfile(full) and full != keep_path:
+                files.append((os.path.getmtime(full), full))
+        if len(files) > MAX_CACHED_MEDIA_FILES:
+            files.sort()
+            for _, fpath in files[:-MAX_CACHED_MEDIA_FILES]:
+                with suppress(Exception):
+                    os.remove(fpath)
+
+
 async def _kill_proc(chat_id: int) -> None:
     task = _rtmp_tasks.pop(chat_id, None)
     if task and not task.done():
@@ -198,7 +222,7 @@ async def _kill_proc(chat_id: int) -> None:
         with suppress(Exception):
             proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=1.5)
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
@@ -219,13 +243,15 @@ async def _clear_rtmp_state(chat_id: int) -> None:
 
 
 async def stop_rtmp_if_active(chat_id: int, discard_call: bool = True) -> None:
-    if not is_rtmp_active(chat_id) and chat_id not in _rtmp_call_epoch:
+    if not is_rtmp_active(chat_id) and not _rtmp_call_ready.get(chat_id):
         return
     if discard_call:
         await _discard_call(chat_id)
     else:
         await _kill_proc(chat_id)
         await _clear_rtmp_state(chat_id)
+        _rtmp_call_ready.pop(chat_id, None)
+        _rtmp_url_cache.pop(chat_id, None)
 
 
 async def _fetch_cover(vid_id: str) -> str | None:
@@ -260,6 +286,16 @@ async def _ensure_assistant(chat_id: int):
     return ub
 
 
+async def _is_active_call_rtmp(ub, active_call) -> bool:
+    if not active_call:
+        return False
+    try:
+        res = await ub.invoke(raw.functions.phone.GetGroupCall(call=active_call, limit=0))
+        return bool(getattr(res.call, "rtmp_stream", False))
+    except Exception:
+        return False
+
+
 async def _ensure_rtmp_call(chat_id: int, force_recreate: bool = False, title: str = "Hi-Fi Stereo") -> str:
     from AnnieXMedia.core.call import StreamController
 
@@ -268,9 +304,6 @@ async def _ensure_rtmp_call(chat_id: int, force_recreate: bool = False, title: s
             await StreamController.stop_stream(chat_id)
         force_recreate = True
 
-    if not force_recreate and chat_id in _rtmp_call_epoch and chat_id in _rtmp_url_cache:
-        return _rtmp_url_cache[chat_id]
-
     ub = await _ensure_assistant(chat_id)
     peer = await ub.resolve_peer(chat_id)
 
@@ -278,32 +311,36 @@ async def _ensure_rtmp_call(chat_id: int, force_recreate: bool = False, title: s
         ub.invoke(raw.functions.phone.GetGroupCallStreamRtmpUrl(peer=peer, revoke=False)),
         ub.invoke(raw.functions.channels.GetFullChannel(channel=peer)),
     )
-    rtmp_full_url = f"{rtmp_info.url}{rtmp_info.key}"
+    rtmp_full_url = f"{rtmp_info.url.rstrip('/')}/{rtmp_info.key.lstrip('/')}"
     active_call = full_chat.full_chat.call
 
-    need_recreate = force_recreate or (chat_id not in _rtmp_call_epoch) or not active_call
+    is_rtmp_call = await _is_active_call_rtmp(ub, active_call) if active_call else False
+    need_recreate = force_recreate or not active_call or not is_rtmp_call
 
-    if active_call and need_recreate:
-        with suppress(Exception):
-            await ub.invoke(raw.functions.phone.DiscardGroupCall(call=active_call))
-        await asyncio.sleep(0.35)
-        active_call = None
+    if need_recreate:
+        _rtmp_recreating.add(chat_id)
+        try:
+            if active_call:
+                await ub.invoke(raw.functions.phone.DiscardGroupCall(call=active_call))
+                await asyncio.sleep(0.8)
 
-    if not active_call:
-        await ub.invoke(
-            raw.functions.phone.CreateGroupCall(
-                peer=peer,
-                random_id=random.randint(10000, 99999999),
-                rtmp_stream=True,
-                title=title[:32],
+            await ub.invoke(
+                raw.functions.phone.CreateGroupCall(
+                    peer=peer,
+                    random_id=random.randint(10000, 99999999),
+                    rtmp_stream=True,
+                    title=title[:32],
+                )
             )
-        )
-        _rtmp_call_epoch[chat_id] = time.time()
-        await asyncio.sleep(0.35)
-    elif chat_id not in _rtmp_call_epoch:
-        _rtmp_call_epoch[chat_id] = time.time()
+            _rtmp_call_ready[chat_id] = True
+            _rtmp_url_cache[chat_id] = rtmp_full_url
+            await asyncio.sleep(1.2)
+        finally:
+            _rtmp_recreating.discard(chat_id)
+    else:
+        _rtmp_call_ready[chat_id] = True
+        _rtmp_url_cache[chat_id] = rtmp_full_url
 
-    _rtmp_url_cache[chat_id] = rtmp_full_url
     return rtmp_full_url
 
 
@@ -311,7 +348,7 @@ async def _discard_call(chat_id: int) -> bool:
     await _kill_proc(chat_id)
     await _clear_rtmp_state(chat_id)
     _rtmp_url_cache.pop(chat_id, None)
-    _rtmp_call_epoch.pop(chat_id, None)
+    _rtmp_call_ready.pop(chat_id, None)
     try:
         ub = await get_assistant(chat_id)
         peer = await ub.resolve_peer(chat_id)
@@ -333,69 +370,133 @@ async def _resolve_stream_url(vid_id: str, is_video: bool, force_prog: bool = Fa
     return await YouTube.download(vid_id, None, video=False, videoid=vid_id)
 
 
+async def _download_to_ram(media_url: str, vid_id: str, is_video: bool, is_live: bool = False) -> str | None:
+    if is_live or not media_url or "m3u8" in str(media_url).lower():
+        return None
+
+    ext = "mp4" if is_video else "m4a"
+    local_path = os.path.join(MEDIA_DIR, f"{vid_id}_{'v' if is_video else 'a'}.{ext}")
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 32 * 1024:
+        return local_path
+
+    tmp_path = f"{local_path}.part"
+    ua = VISIONOS_UA if "c=VISIONOS" in str(media_url) else ANDROID_UA
+    headers = {"User-Agent": ua, "Accept": "*/*"}
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=45, connect=6, sock_read=15)
+        async with aiohttp.ClientSession(timeout=timeout) as dl_session:
+            total_written = 0
+            max_bytes = MAX_LOCAL_DOWNLOAD_MB * 1024 * 1024
+            chunk_size = 2 * 1024 * 1024
+
+            async with dl_session.head(media_url, headers=headers) as head_resp:
+                content_len = int(head_resp.headers.get("Content-Length") or 0)
+
+            if content_len > max_bytes:
+                return None
+
+            async with aiofiles.open(tmp_path, "wb") as f:
+                if content_len > 0:
+                    start = 0
+                    while start < content_len:
+                        end = min(start + chunk_size - 1, content_len - 1)
+                        req_headers = {**headers, "Range": f"bytes={start}-{end}"}
+                        async with dl_session.get(media_url, headers=req_headers) as resp:
+                            if resp.status not in (200, 206):
+                                raise RuntimeError(f"HTTP {resp.status}")
+                            async for data in resp.content.iter_chunked(131072):
+                                await f.write(data)
+                                total_written += len(data)
+                        start = end + 1
+                else:
+                    async with dl_session.get(media_url, headers=headers) as resp:
+                        if resp.status not in (200, 206):
+                            raise RuntimeError(f"HTTP {resp.status}")
+                        async for data in resp.content.iter_chunked(131072):
+                            total_written += len(data)
+                            if total_written > max_bytes:
+                                raise RuntimeError("File too large for RAM cache")
+                            await f.write(data)
+
+        if total_written > 16 * 1024:
+            os.replace(tmp_path, local_path)
+            _prune_media_cache(keep_path=local_path)
+            return local_path
+    except Exception as e:
+        LOGGER.warning(f"RAM pre-download failed for {vid_id}, falling back to direct stream: {e}")
+    with suppress(Exception):
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    return None
+
+
 def _build_ffmpeg_cmd(
-    media_url: str,
+    media_source: str,
     rtmp_url: str,
     is_video: bool,
     cover_path: str | None = None,
     seek_seconds: int = 0,
-    ts_offset: float = 0.0,
 ) -> list[str]:
-    ua = VISIONOS_UA if "c=VISIONOS" in str(media_url) else ANDROID_UA
+    is_local = os.path.exists(str(media_source))
     seek_args = ["-ss", str(int(seek_seconds))] if seek_seconds > 0 else []
-    offset_args = ["-output_ts_offset", f"{max(0.0, ts_offset):.2f}"] if ts_offset > 0 else []
+
+    net_args: list[str] = []
+    if not is_local:
+        ua = VISIONOS_UA if "c=VISIONOS" in str(media_source) else ANDROID_UA
+        net_args = [
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_on_network_error", "1",
+            "-reconnect_delay_max", "5",
+            "-user_agent", ua,
+        ]
 
     if not is_video:
         if cover_path and os.path.exists(cover_path):
-            v_in = ["-re", "-loop", "1", "-framerate", "20", "-i", str(cover_path)]
-            vf = "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
+            v_in = ["-thread_queue_size", "4096", "-loop", "1", "-framerate", "25", "-i", str(cover_path)]
+            vf = "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p"
         else:
-            v_in = ["-re", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=20"]
-            vf = "format=yuv420p"
+            v_in = ["-thread_queue_size", "4096", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=25"]
+            vf = "fps=25,format=yuv420p"
 
         return [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
-            "-fflags", "+genpts+igndts",
             *v_in,
             "-re",
             "-thread_queue_size", "4096",
-            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-            "-user_agent", ua,
+            *net_args,
             *seek_args,
-            "-i", str(media_url),
+            "-i", str(media_source),
             "-map", "0:v:0", "-map", "1:a:0",
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-profile:v", "baseline", "-pix_fmt", "yuv420p",
-            "-b:v", "250k", "-maxrate", "250k", "-bufsize", "500k",
-            "-r", "20", "-g", "20", "-keyint_min", "20", "-sc_threshold", "0",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+            "-profile:v", "main", "-level", "3.1", "-pix_fmt", "yuv420p", "-bf", "0",
+            "-b:v", "400k", "-maxrate", "500k", "-bufsize", "1000k",
+            "-r", "25", "-g", "25", "-keyint_min", "25", "-sc_threshold", "0",
+            "-af", "aresample=async=1:min_hard_comp=0.100000:first_pts=0",
+            "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-shortest",
-            *offset_args,
             "-flvflags", "no_duration_filesize",
-            "-rtmp_live", "live",
             "-f", "flv", str(rtmp_url),
         ]
 
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
-        "-fflags", "+genpts+igndts",
         "-re",
         "-thread_queue_size", "4096",
-        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-        "-user_agent", ua,
+        *net_args,
         *seek_args,
-        "-i", str(media_url),
+        "-i", str(media_source),
         "-map", "0:v:0", "-map", "0:a:0",
-        "-vf", "scale=640:360,format=yuv420p",
-        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-        "-profile:v", "baseline", "-pix_fmt", "yuv420p",
-        "-b:v", "600k", "-maxrate", "600k", "-bufsize", "1200k",
+        "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p",
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-profile:v", "main", "-level", "3.1", "-pix_fmt", "yuv420p", "-bf", "0",
+        "-b:v", "1000k", "-maxrate", "1200k", "-bufsize", "2400k",
         "-r", "25", "-g", "25", "-keyint_min", "25", "-sc_threshold", "0",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        *offset_args,
+        "-af", "aresample=async=1:min_hard_comp=0.100000:first_pts=0",
+        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ar", "48000", "-ac", "2",
         "-flvflags", "no_duration_filesize",
-        "-rtmp_live", "live",
         "-f", "flv", str(rtmp_url),
     ]
 
@@ -410,6 +511,9 @@ async def _drain_stderr(chat_id: int, proc: asyncio.subprocess.Process) -> None:
             dec = line.decode("utf-8", errors="replace").rstrip()
             if dec:
                 buf.append(dec)
+                low = dec.lower()
+                if any(k in low for k in ("error", "failed", "refused", "broken pipe", "forbidden", "403", "non-monotonous")):
+                    LOGGER.warning(f"[{chat_id}] ffmpeg: {dec}")
     except Exception:
         pass
 
@@ -419,6 +523,7 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
 
     vid_id = track["vid_id"]
     is_video = track["is_video"]
+    is_live = str(track.get("duration_min", "")).lower() == "live" or int(track.get("duration_sec") or 0) == 0
 
     media_url, cover_path, rtmp_url = await asyncio.gather(
         _resolve_stream_url(vid_id, is_video=is_video, force_prog=False),
@@ -431,19 +536,21 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
     if not media_url:
         raise RuntimeError("فشل استخراج رابط البث المباشر.")
 
+    local_media = track.get("local_path")
+    if not (local_media and os.path.exists(local_media)):
+        local_media = await _download_to_ram(media_url, vid_id=vid_id, is_video=is_video, is_live=is_live)
+
+    media_source = local_media or media_url
     track["media_url"] = media_url
+    track["local_path"] = local_media
     track["cover_path"] = cover_path
 
-    epoch = _rtmp_call_epoch.get(chat_id, time.time())
-    ts_offset = max(0.0, time.time() - epoch)
-
     cmd = _build_ffmpeg_cmd(
-        media_url=media_url,
+        media_source=media_source,
         rtmp_url=rtmp_url,
         is_video=is_video,
         cover_path=cover_path,
         seek_seconds=seek_seconds,
-        ts_offset=ts_offset,
     )
 
     proc = await asyncio.create_subprocess_exec(
@@ -472,7 +579,7 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
             "chat_id": chat_id,
             "file": f"rtmp_{vid_id}",
             "vidid": vid_id,
-            "seconds": 0,
+            "seconds": track.get("duration_sec", 0),
             "played": seek_seconds,
         }
     ]
@@ -487,19 +594,20 @@ async def _start_track(chat_id: int, track: Dict[str, Any], seek_seconds: int = 
         if _rtmp_procs.get(cid) is not p:
             return
 
-        if (time.time() - t0) < 3.0 and not _rtmp_state.get(cid, {}).get("paused"):
+        if (time.time() - t0) < 4.0 and not _rtmp_state.get(cid, {}).get("paused"):
+            LOGGER.warning(f"[{cid}] RTMP exited early ({time.time() - t0:.1f}s), recreating RTMP call and retrying...")
             with suppress(Exception):
                 fb_url, new_rtmp = await asyncio.gather(
                     _resolve_stream_url(vid_id, is_video=is_video, force_prog=True),
                     _ensure_rtmp_call(cid, force_recreate=True, title=track["title"]),
                 )
+                retry_src = local_media if (local_media and os.path.exists(local_media)) else (fb_url or media_url)
                 retry_cmd = _build_ffmpeg_cmd(
-                    media_url=fb_url or media_url,
+                    media_source=retry_src,
                     rtmp_url=new_rtmp,
                     is_video=is_video,
                     cover_path=cover_path,
                     seek_seconds=seek_seconds,
-                    ts_offset=0.0,
                 )
                 p2 = await asyncio.create_subprocess_exec(
                     *retry_cmd,
