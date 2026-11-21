@@ -17,8 +17,12 @@ close = 30
 async def on_vc_started(_, message: Message):
     chat_id = message.chat.id
     with suppress(Exception):
-        from AnnieXMedia.plugins.play.rtmp_stereo import is_rtmp_active, _rtmp_call_ready
-        if is_rtmp_active(chat_id) or _rtmp_call_ready.get(chat_id):
+        from AnnieXMedia.plugins.play.rtmp_stereo import (
+            _rtmp_call_ready,
+            is_rtmp_active,
+            is_rtmp_recreating,
+        )
+        if is_rtmp_active(chat_id) or _rtmp_call_ready.get(chat_id) or is_rtmp_recreating(chat_id):
             return
     if StreamController.is_joining(chat_id) or chat_id in StreamController.active_calls:
         return
@@ -30,8 +34,16 @@ async def on_vc_started(_, message: Message):
 async def on_vc_ended(_, message: Message):
     chat_id = message.chat.id
     with suppress(Exception):
-        from AnnieXMedia.plugins.play.rtmp_stereo import is_rtmp_active
-        if is_rtmp_active(chat_id):
+        from AnnieXMedia.plugins.play.rtmp_stereo import (
+            _rtmp_call_ready,
+            is_rtmp_active,
+            is_rtmp_recreating,
+            stop_rtmp_if_active,
+        )
+        if is_rtmp_recreating(chat_id):
+            return
+        if is_rtmp_active(chat_id) or _rtmp_call_ready.get(chat_id):
+            await stop_rtmp_if_active(chat_id, discard_call=False)
             return
     if StreamController.is_joining(chat_id):
         return
