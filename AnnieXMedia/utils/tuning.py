@@ -1,32 +1,23 @@
 import asyncio
 import os
 
-# 🔥 Fly.io Aggressive Mode
-# نستخدم كل الكورات المتاحة + 4 Threads إضافية لضمان عدم توقف الـ I/O
-# هذا يجعل المعالج "يعصر" نفسه لأخر قطرة
-CPU = (os.cpu_count() or 2) + 4
+# 🔥 Fly.io Performance-CPU-10x (66.5 GB RAM) + Py-TgCalls v4.0 Passthrough Mode
+# نستخدم كل الكورات المتاحة (10 Performance Cores) + 4 Threads إضافية لضمان عدم توقف الـ I/O
+CPU = (os.cpu_count() or 10) + 4
 
-# ⚠️ التوازن الذهبي (Speed vs Capacity):
-# نصيحة لوجه الله: لا تجعلها 12.
-# لو 12 شخص نزلوا في نفس الوقت، السرعة ستتقسم عليهم والكل سيصبح بطيء.
-# اجعلها 6 فقط. هذا يعني أن 6 أشخاص سينزلون بسرعة "صاروخ"، والباقي ينتظر ثواني قليلة.
-# (Quality > Quantity)
-MAX_CONCURRENT = 8
+# التوازن الذهبي لسيرفر 10x Performance CPU + Opus/Video Passthrough
+MAX_CONCURRENT = 10
 
 # 🚀 THE SPACE CHUNK (10MB):
-# هذا الرقم يجب أن يطابق ما وضعناه في Downloader.py
-# 10MB هو الرقم السحري الذي يجعل يوتيوب يعتقد أنك متصفح ويضخ البيانات بأقصى سرعة.
 # 10 * 1024 * 1024 = 10,485,760 bytes
-CHUNK_SIZE = 10485760 
+CHUNK_SIZE = 10485760
 
 # ⏳ Timeouts
-# نرفع الوقت لضمان أن المكسات الطويلة (ساعة+) لا تفصل في المنتصف
-YTDLP_TIMEOUT = 300 
+YTDLP_TIMEOUT = 300
 
-# 🧠 Meta Cache (الذاكرة)
-# نزيد حجم الذاكرة ليحفظ روابط أكثر، فلا يحتاج للبحث عنها مرة أخرى
-YOUTUBE_META_TTL = 1200  # 20 دقيقة
-YOUTUBE_META_MAX = 10000 # يحفظ 10 آلاف رابط
+# 🧠 Meta Cache (الذاكرة — السيرفر يملك 66GB RAM)
+YOUTUBE_META_TTL = 1800  # 30 دقيقة
+YOUTUBE_META_MAX = 25000  # يحفظ 25 ألف رابط في الرام
 
 # السيمفور (شرطي المرور)
 SEM = asyncio.Semaphore(MAX_CONCURRENT)
