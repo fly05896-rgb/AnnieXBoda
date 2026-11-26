@@ -24,8 +24,7 @@ pillow
 wget
 arabic-reshaper
 python-bidi
-ntgcalls
-py-tgcalls
+py-tgcalls==4.0.0b4
 kurigram
 pyromod
 fastapi
