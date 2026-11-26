@@ -1,5 +1,5 @@
 # Authored By Certified Coders 2026
-# Module: VC Info - Arabic Commands + Loading Status "جـاري التحقق ..."
+# Module: VC Info - Arabic Commands + Loading Status + Py-TgCalls v4.0 E2E Key Reporting
 
 from pyrogram import filters
 from pyrogram.types import Message
@@ -12,17 +12,17 @@ from AnnieXMedia.utils.admin_filters import admin_filter
 
 
 @app.on_message(
-    filters.command(["م ف ك", "مين في الكول", "vcinfo", "vcmembers"], prefixes=["", "/", "!", "."]) 
-    & filters.group 
-    & admin_filter 
+    filters.command(["م ف ك", "مين في الكول", "vcinfo", "vcmembers"], prefixes=["", "/", "!", "."])
+    & filters.group
+    & admin_filter
     & ~BANNED_USERS
 )
 async def vc_info(client, message: Message):
     chat_id = message.chat.id
-    
+
     # --- [ رسالة التحقق الأولية ] ---
     status = await message.reply_text("**جـاري التحقق ...**")
-    
+
     try:
         assistant = await group_assistant(StreamController, chat_id)
         participants = await assistant.get_participants(chat_id)
@@ -38,25 +38,23 @@ async def vc_info(client, message: Message):
             except Exception:
                 name = f"<code>{p.user_id}</code>"
 
-            # تحديد الحالة (بدون إيموجي)
             mute_status = "[مكتوم]" if p.muted else "[متحدث]"
-            
-            # التحقق من مشاركة الشاشة والفيديو
+
             screen_status = ""
             if getattr(p, "screen_sharing", False):
                 screen_status = " | [مشاركة شاشة]"
             elif getattr(p, "video", False):
                 screen_status = " | [كاميرا]"
-                
+
+            e2e_status = " | [E2E]" if getattr(p, "has_e2e_key", False) else ""
             volume_level = getattr(p, "volume", "غير متاح")
 
-            info = f"{mute_status} {name} | الصوت: {volume_level}{screen_status}"
+            info = f"{mute_status} {name} | الصوت: {volume_level}{screen_status}{e2e_status}"
             msg_lines.append(info)
 
         msg_lines.append(f"\nالعدد الكلي: **{len(participants)}**")
-        
-        # تعديل الرسالة بالنتيجة النهائية
+
         await status.edit_text("\n".join(msg_lines))
-        
+
     except Exception as e:
         await status.edit_text(f"**فشل جلب المعلومات:**\n`{e}`")
