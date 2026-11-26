@@ -392,26 +392,35 @@ class YouTubeAPI:
             vision_sd = (vision_data or {}).get("streamingData") or {}
             android_sd = (android_data or {}).get("streamingData") or {}
 
-            # 1. استخراج رابط الصوت النقي itag=140 من VISIONOS مع الغاء الدبلجة التلقائية فقط
+            # 1. استخراج رابط الصوت النقي: أولوية قصوى لـ Opus (itag=251/250/249) لتفعيل Opus Passthrough في Py-TgCalls v4.0
+            # مع الاحتفاظ بـ itag=140 (M4A) كاحتياطي ولتحميل الأغاني (/song)
+            opus_audio_url: str | None = None
+            opus_audio_fmt: dict[str, Any] = {}
             vision_audio_url: str | None = None
             vision_audio_fmt: dict[str, Any] = {}
-            for fmt in vision_sd.get("adaptiveFormats", []):
-                f_url = fmt.get("url")
-                if not f_url:
-                    continue
-                mime = str(fmt.get("mimeType", ""))
-                itag = str(fmt.get("itag", ""))
-                if "audio" in mime:
+            for sd_source in (android_sd, vision_sd):
+                for fmt in sd_source.get("adaptiveFormats", []):
+                    f_url = fmt.get("url")
+                    if not f_url:
+                        continue
+                    mime = str(fmt.get("mimeType", "")).lower()
+                    itag = str(fmt.get("itag", ""))
+                    if "audio" not in mime:
+                        continue
                     at = fmt.get("audioTrack") or {}
                     disp = str(at.get("displayName") or "").lower()
                     if at.get("isAutoDubbed") or "dubbed" in disp or "descriptive" in disp:
                         continue
-                    vision_audio_url = f_url
-                    vision_audio_fmt = fmt
-                    if itag == "140" and (not at or "original" in disp or at.get("audioIsDefault")):
-                        break
+                    is_original = not at or "original" in disp or at.get("audioIsDefault")
+                    if "opus" in mime or itag in ("251", "250", "249"):
+                        if not opus_audio_url or (itag == "251" and is_original):
+                            opus_audio_url = f_url
+                            opus_audio_fmt = fmt
+                    if not vision_audio_url or (itag == "140" and is_original):
+                        vision_audio_url = f_url
+                        vision_audio_fmt = fmt
 
-            # 2. استخراج رابط itag=18 من ANDROID
+            # 2. استخراج رابط الفيديو: أولوية لـ itag=22 (720p) ثم itag=18 (360p) لدعم Video Passthrough بأعلى جودة
             prog_stream_url: str | None = None
             prog_fmt: dict[str, Any] = {}
             for sd_source in (android_sd, vision_sd):
@@ -420,12 +429,13 @@ class YouTubeAPI:
                     if not f_url:
                         continue
                     itag = str(fmt.get("itag", ""))
-                    if itag in ("18", "22"):
-                        prog_stream_url = f_url
-                        prog_fmt = fmt
-                        if itag == "18":
+                    if itag in ("22", "18"):
+                        if not prog_stream_url or itag == "22":
+                            prog_stream_url = f_url
+                            prog_fmt = fmt
+                        if itag == "22":
                             break
-                if prog_stream_url:
+                if prog_stream_url and str(prog_fmt.get("itag", "")) == "22":
                     break
 
             hls_url = vision_sd.get("hlsManifestUrl") or android_sd.get("hlsManifestUrl")
@@ -434,8 +444,8 @@ class YouTubeAPI:
                 audio_call_url = hls_url
                 video_call_url = hls_url
             else:
-                audio_call_url = vision_audio_url or prog_stream_url or hls_url
-                video_call_url = prog_stream_url or hls_url or vision_audio_url
+                audio_call_url = opus_audio_url or vision_audio_url or prog_stream_url or hls_url
+                video_call_url = prog_stream_url or hls_url or opus_audio_url or vision_audio_url
 
             if audio_call_url:
                 self._url_cache[f"{v_id}:a"] = (audio_call_url, now + self._cache_ttl)
@@ -862,9 +872,9 @@ class YouTubeAPI:
         if format_id:
             media_format = str(format_id)
         elif is_video:
-            media_format = "18/22/best[ext=mp4]/best[protocol*=m3u8]/best"
+            media_format = "22/best[ext=mp4][height<=1080]/best[vcodec^=vp9][height<=1080]/best[vcodec^=av01][height<=1080]/18/best[protocol*=m3u8]/best"
         else:
-            media_format = "140/18/bestaudio[ext=m4a]/bestaudio/best"
+            media_format = "251/250/249/bestaudio[acodec=opus]/bestaudio[ext=webm]/140/bestaudio[ext=m4a]/bestaudio/best"
 
         opts = {**self.fast_opts, "cookiefile": None, "format": media_format}
         if self._visitor_data:
