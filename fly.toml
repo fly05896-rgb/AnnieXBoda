@@ -10,6 +10,9 @@ primary_region = 'fra'
   dockerfile = 'Dockerfile'
 
 [env]
+  AUDIO_QUALITY = 'MASTER'
+  CALL_CHAT_ANNOUNCE = 'False'
+  ENABLE_PASSTHROUGH = 'True'
   IP_VERSION = '4'
   MKL_NUM_THREADS = '10'
   NUMEXPR_NUM_THREADS = '10'
@@ -17,6 +20,7 @@ primary_region = 'fra'
   PYTHONDONTWRITEBYTECODE = '1'
   PYTHONUNBUFFERED = '1'
   TMPDIR = '/dev/shm'
+  VIDEO_QUALITY = 'FHD_1080p'
 
 [http_service]
   internal_port = 8080
