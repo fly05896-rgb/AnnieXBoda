@@ -7,7 +7,12 @@ from pyrogram import __version__ as pyrover
 from pyrogram import filters
 from pyrogram.errors import MessageIdInvalid
 from pyrogram.types import InputMediaVideo, Message
-from pytgcalls.__version__ import __version__ as pytgver
+
+try:
+    from pytgcalls.__version__ import __version__ as pytgver
+except Exception:
+    import pytgcalls as _pytg
+    pytgver = getattr(_pytg, "__version__", "4.0.0b4")
 
 import config
 from AnnieXMedia import app
