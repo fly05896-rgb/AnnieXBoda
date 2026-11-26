@@ -1,20 +1,23 @@
 # Authored By Certified Coders 2026
 # File Path: AnnieXMedia/core/call.py
-# System: PyTgCalls V3.0.0 & NTgCalls V3.0.5 Core Call Controller (Zero Conflict with RTMP Stereo)
+# System: PyTgCalls v4.0.0b4 Core Call Controller (Master 510kbps Audio, Opus/Video Passthrough,
+#         Live Bitrate Control, Group Call Chat, Lightweight/Grid Recording, Zero Conflict with RTMP Stereo)
 
 import asyncio
 import logging
 import os
+import time
 import traceback
 from asyncio import Lock
 from contextlib import suppress
 from datetime import datetime, timedelta
+from typing import Any
 
-import pytgcalls.ffmpeg as _pytg_ffmpeg
 from pyrogram import enums, errors
 from pyrogram.errors import ChatAdminRequired
 from pyrogram.types import InlineKeyboardMarkup, InputMediaPhoto
 
+import pytgcalls as _pytgcalls_pkg
 from pytgcalls import PyTgCalls, filters
 from pytgcalls.exceptions import (
     NoActiveGroupCall,
@@ -32,6 +35,16 @@ from pytgcalls.types import (
     Update,
     VideoQuality,
 )
+
+try:
+    from pytgcalls.types.raw import AudioParameters
+except Exception:
+    AudioParameters = None
+
+try:
+    from pytgcalls.types import RecordStream
+except Exception:
+    RecordStream = None
 
 import config
 from strings import get_string
@@ -56,32 +69,37 @@ from AnnieXMedia.utils.stream.autoclear import auto_clean
 from AnnieXMedia.utils.thumbnails import get_thumb
 
 
-if not getattr(_pytg_ffmpeg, "_annie_eof_patched", False):
-    _orig_build_cmd = _pytg_ffmpeg.build_command
+# ── Safe FFmpeg EOF Patch (guarded for Py-TgCalls v4.0.X Passthrough compatibility) ──
+try:
+    import pytgcalls.ffmpeg as _pytg_ffmpeg
 
-    def _patched_build_command(*args, **kwargs) -> list[str]:
-        cmd = _orig_build_cmd(*args, **kwargs)
-        if not cmd or cmd[0] != "ffmpeg":
-            return cmd
-        cleaned: list[str] = []
-        skip_next = False
-        for token in cmd:
-            if skip_next:
-                skip_next = False
-                continue
-            if token == "-reconnect_at_eof":
-                skip_next = True
-                continue
-            cleaned.append(token)
-        return cleaned
+    if hasattr(_pytg_ffmpeg, "build_command") and not getattr(_pytg_ffmpeg, "_annie_eof_patched", False):
+        _orig_build_cmd = _pytg_ffmpeg.build_command
 
-    _pytg_ffmpeg.build_command = _patched_build_command
-    try:
-        import pytgcalls.types.stream.media_stream as _ms_mod
-        _ms_mod.build_command = _patched_build_command
-    except Exception:
-        pass
-    _pytg_ffmpeg._annie_eof_patched = True
+        def _patched_build_command(*args, **kwargs) -> list[str]:
+            cmd = _orig_build_cmd(*args, **kwargs)
+            if not cmd or cmd[0] != "ffmpeg":
+                return cmd
+            cleaned: list[str] = []
+            skip_next = False
+            for token in cmd:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if token == "-reconnect_at_eof":
+                    skip_next = True
+                    continue
+                cleaned.append(token)
+            return cleaned
+
+        _pytg_ffmpeg.build_command = _patched_build_command
+        with suppress(Exception):
+            import pytgcalls.types.stream.media_stream as _ms_mod
+            if hasattr(_ms_mod, "build_command"):
+                _ms_mod.build_command = _patched_build_command
+        _pytg_ffmpeg._annie_eof_patched = True
+except Exception:
+    pass
 
 
 class PyTgCallsErrorFilter(logging.Filter):
@@ -100,18 +118,75 @@ autoend = {}
 counter = {}
 
 
-def _build_stream(path: str, video: bool = False, ffmpeg_opts: str = "") -> MediaStream:
+def _resolve_audio_parameters(
+    preset_override: str | None = None,
+    bitrate_override: int | None = None,
+) -> Any:
+    """
+    Resolve AudioQuality preset or custom AudioParameters for Py-TgCalls v4.0.X.
+    - Uses AudioQuality.MASTER (510 kbps max Opus stereo) by default.
+    - Supports new v4.0 AudioParameters(sample_rate=48000, channels=2, bitrate=...).
+    """
+    custom_bitrate = bitrate_override if bitrate_override is not None else getattr(config, "AUDIO_BITRATE", 0)
+    if custom_bitrate and int(custom_bitrate) > 0 and AudioParameters is not None:
+        bps = int(custom_bitrate)
+        if bps < 1000:
+            bps *= 1000
+        bps = max(16000, min(510000, bps))
+        try:
+            return AudioParameters(sample_rate=48000, channels=2, bitrate=bps)
+        except TypeError:
+            pass
+
+    preset_name = (preset_override or getattr(config, "AUDIO_QUALITY", "MASTER")).upper()
+    for candidate in (preset_name, "MASTER", "STUDIO", "HIGH"):
+        val = getattr(AudioQuality, candidate, None)
+        if val is not None:
+            return val
+    return AudioQuality.HIGH
+
+
+def _resolve_video_parameters(preset_override: str | None = None) -> Any:
+    """Resolve VideoQuality preset (default FHD_1080p for Video Passthrough + 10x CPU server)."""
+    preset_name = preset_override or getattr(config, "VIDEO_QUALITY", "FHD_1080p")
+    for candidate in (preset_name, "FHD_1080p", "HD_720p"):
+        val = getattr(VideoQuality, candidate, None)
+        if val is not None:
+            return val
+    return VideoQuality.HD_720p
+
+
+def _build_stream(
+    path: str,
+    video: bool = False,
+    ffmpeg_opts: str = "",
+    audio_params: Any = None,
+    video_params: Any = None,
+) -> MediaStream:
+    """
+    Build a Py-TgCalls v4.0.X MediaStream:
+    - Keeps ffmpeg_parameters=None during normal playback when ENABLE_PASSTHROUGH=True
+      so Opus Passthrough (WebM/Ogg/YouTube) & Video Passthrough (H264/VP8/VP9/AV1) engage natively.
+    - Applies custom ffmpeg_opts only when needed (e.g. -ss seeking).
+    """
     path = str(path)
-    base_flags = "-probesize 512k -analyzeduration 1000000 "
-    final_ffmpeg = (base_flags + ffmpeg_opts).strip()
+    passthrough = getattr(config, "ENABLE_PASSTHROUGH", True)
+    clean_opts = (ffmpeg_opts or "").strip()
+
+    if clean_opts:
+        final_ffmpeg = f"-probesize 512k -analyzeduration 1000000 {clean_opts}".strip()
+    elif passthrough:
+        final_ffmpeg = None
+    else:
+        final_ffmpeg = "-probesize 512k -analyzeduration 1000000"
 
     return MediaStream(
         media_path=path,
-        audio_parameters=AudioQuality.HIGH,
-        video_parameters=VideoQuality.HD_720p,
+        audio_parameters=audio_params or _resolve_audio_parameters(),
+        video_parameters=video_params or _resolve_video_parameters(),
         audio_flags=MediaStream.Flags.REQUIRED,
         video_flags=MediaStream.Flags.REQUIRED if video else MediaStream.Flags.IGNORE,
-        ffmpeg_parameters=final_ffmpeg if final_ffmpeg else None,
+        ffmpeg_parameters=final_ffmpeg,
     )
 
 
@@ -145,6 +220,8 @@ class Call:
         self.chat_locks: dict[int, Lock] = {}
         self._stream_end_cache: dict[int, float] = {}
         self._joining_chats: set[int] = set()
+        self.chat_audio_override: dict[int, tuple[str | None, int | None]] = {}
+        self.active_recordings: dict[int, str] = {}
 
     def get_lock(self, chat_id: int) -> Lock:
         if chat_id not in self.chat_locks:
@@ -153,6 +230,108 @@ class Call:
 
     def is_joining(self, chat_id: int) -> bool:
         return chat_id in self._joining_chats
+
+    def get_chat_audio_params(self, chat_id: int) -> Any:
+        override = self.chat_audio_override.get(chat_id)
+        if override:
+            return _resolve_audio_parameters(preset_override=override[0], bitrate_override=override[1])
+        return _resolve_audio_parameters()
+
+    async def set_audio_quality(
+        self,
+        chat_id: int,
+        preset: str | None = None,
+        bitrate_kbps: int | None = None,
+    ) -> str:
+        """
+        Save per-chat audio quality (MASTER/STUDIO/HIGH/VOICE or custom kbps bitrate)
+        and re-apply immediately if a stream is currently playing.
+        """
+        bps = (bitrate_kbps * 1000) if bitrate_kbps else None
+        self.chat_audio_override[chat_id] = (preset.upper() if preset else None, bps)
+        new_params = self.get_chat_audio_params(chat_id)
+
+        label = f"{bitrate_kbps} kbps (48kHz Stereo)" if bitrate_kbps else f"AudioQuality.{(preset or config.AUDIO_QUALITY).upper()}"
+
+        # Apply live if currently playing in this chat
+        queue = db.get(chat_id)
+        if queue and chat_id in self.active_calls:
+            with suppress(Exception):
+                assistant = await group_assistant(self, chat_id)
+                current = queue[0]
+                is_video = str(current.get("streamtype")) == "video"
+                played = int(current.get("played") or 0)
+                file_path = current.get("file")
+                vidid = current.get("vidid")
+                if vidid and (str(file_path).startswith("vid_") or not os.path.exists(str(file_path))):
+                    direct = await YouTube.get_direct_link(
+                        f"https://www.youtube.com/watch?v={vidid}",
+                        prefer_audio=not is_video,
+                    )
+                    if direct:
+                        file_path = direct
+                if file_path:
+                    from AnnieXMedia.utils.formatters import seconds_to_min
+                    ffmpeg_opts = f"-ss {seconds_to_min(played)}" if played > 3 else ""
+                    stream = _build_stream(
+                        file_path,
+                        video=is_video,
+                        ffmpeg_opts=ffmpeg_opts,
+                        audio_params=new_params,
+                    )
+                    async with self.get_lock(chat_id):
+                        await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
+        return label
+
+    async def send_call_message(self, chat_id: int, html_text: str) -> Any:
+        """Send a Telegram Bot API HTML-formatted message inside the Group Call Chat (Py-TgCalls v4.0)."""
+        assistant = await group_assistant(self, chat_id)
+        if not hasattr(assistant, "send_message"):
+            raise AssistantErr("Group Call Messages require Py-TgCalls v4.0.0b4+.")
+        return await assistant.send_message(chat_id, html_text)
+
+    async def delete_call_messages(self, chat_id: int, message_ids: list[int] | int) -> Any:
+        """Delete messages from the Group Call Chat (Py-TgCalls v4.0)."""
+        assistant = await group_assistant(self, chat_id)
+        if not hasattr(assistant, "delete_messages"):
+            raise AssistantErr("Group Call Messages require Py-TgCalls v4.0.0b4+.")
+        ids = [message_ids] if isinstance(message_ids, int) else list(message_ids)
+        return await assistant.delete_messages(chat_id, ids)
+
+    async def start_recording(self, chat_id: int, video: bool = False) -> str:
+        """
+        Start recording the group call using Py-TgCalls v4.0 RecordStream:
+        - video=False: Lightweight .opus recording (written directly without FFmpeg!)
+        - video=True:  .mkv video + screen-sharing animated grid recording!
+        """
+        if RecordStream is None:
+            raise AssistantErr("RecordStream requires Py-TgCalls v4.0.0b4+.")
+        rec_dir = getattr(config, "RECORDING_PATH", "/dev/shm/AnnieRecordings")
+        os.makedirs(rec_dir, exist_ok=True)
+        ext = "mkv" if video else "opus"
+        out_path = os.path.join(rec_dir, f"rec_{abs(chat_id)}_{int(time.time())}.{ext}")
+
+        assistant = await group_assistant(self, chat_id)
+        async with self.get_lock(chat_id):
+            rec_stream = RecordStream(
+                audio=True,
+                video=video,
+                audio_parameters=self.get_chat_audio_params(chat_id),
+                video_parameters=_resolve_video_parameters(),
+                output_path=out_path,
+            )
+            await assistant.record(chat_id, rec_stream)
+            self.active_recordings[chat_id] = out_path
+        return out_path
+
+    async def stop_recording(self, chat_id: int) -> str | None:
+        """Stop active RecordStream and return the recorded file path."""
+        out_path = self.active_recordings.pop(chat_id, None)
+        assistant = await group_assistant(self, chat_id)
+        async with self.get_lock(chat_id):
+            with suppress(Exception):
+                await assistant.leave_call(chat_id, close=False)
+        return out_path
 
     async def is_truly_playing(self, chat_id: int) -> bool:
         # اذا كان البث الحالي هو RTMP Stereo وليس PyTgCalls، نرجع False لكي يقوم امر شغل ببدء مكالمة عادية جديدة
@@ -272,6 +451,7 @@ class Call:
             assistant = await group_assistant(self, chat_id)
             await _clear_(chat_id)
             self.active_calls.discard(chat_id)
+            self.active_recordings.pop(chat_id, None)
             with suppress(Exception):
                 await assistant.leave_call(chat_id, close=False)
 
@@ -285,6 +465,7 @@ class Call:
 
             await _clear_(chat_id)
             self.active_calls.discard(chat_id)
+            self.active_recordings.pop(chat_id, None)
 
             with suppress(Exception):
                 await assistant.leave_call(chat_id, close=False)
@@ -303,7 +484,12 @@ class Call:
             assistant = await group_assistant(self, chat_id)
             ffmpeg_opts = f"-ss {to_seek} "
             is_video = mode == "video"
-            stream = _build_stream(file_path, video=is_video, ffmpeg_opts=ffmpeg_opts)
+            stream = _build_stream(
+                file_path,
+                video=is_video,
+                ffmpeg_opts=ffmpeg_opts,
+                audio_params=self.get_chat_audio_params(chat_id),
+            )
             await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
 
     async def speedup_stream(self, chat_id: int, file_path: str, speed: float | str, playing: list) -> None:
@@ -323,7 +509,7 @@ class Call:
                     target_input = direct
 
             os.makedirs("downloads", exist_ok=True)
-            ext = "mp4" if is_video else "m4a"
+            ext = "mp4" if is_video else "opus"
             out_file = f"downloads/speed_{chat_id}_{spd}.{ext}"
 
             if not os.path.exists(out_file):
@@ -339,6 +525,7 @@ class Call:
                     cmd = [
                         "ffmpeg", "-y", "-i", str(target_input),
                         "-vn", "-filter:a", f"atempo={spd}",
+                        "-c:a", "libopus", "-b:a", "256k",
                         out_file,
                     ]
                 proc = await asyncio.create_subprocess_exec(
@@ -364,13 +551,19 @@ class Call:
             playing[0]["speed"] = spd
 
             ffmpeg_opts = f"-ss {seconds_to_min(new_played)} " if new_played > 0 else ""
-            stream = _build_stream(out_file, video=is_video, ffmpeg_opts=ffmpeg_opts)
+            stream = _build_stream(
+                out_file,
+                video=is_video,
+                ffmpeg_opts=ffmpeg_opts,
+                audio_params=self.get_chat_audio_params(chat_id),
+            )
             await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
 
     async def skip_stream(self, chat_id: int, link: str, video: bool = False) -> None:
         async with self.get_lock(chat_id):
             assistant = await group_assistant(self, chat_id)
-            stream = _build_stream(link, video=video)
+            audio_params = self.get_chat_audio_params(chat_id)
+            stream = _build_stream(link, video=video, audio_params=audio_params)
             try:
                 await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
             except (NoAudioSourceFound, NoVideoSourceFound):
@@ -378,7 +571,7 @@ class Call:
                 vid = q[0].get("vidid") if q else None
                 recovered = await YouTube.recover_stream(link, videoid=vid, video=video)
                 if recovered:
-                    stream = _build_stream(recovered, video=video)
+                    stream = _build_stream(recovered, video=video, audio_params=audio_params)
                     await assistant.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
                 else:
                     raise
@@ -416,7 +609,8 @@ class Call:
                         if assistant_member.status == enums.ChatMemberStatus.BANNED:
                             raise AssistantErr("Assistant is banned in this channel.")
 
-                stream = _build_stream(link, video=video)
+                audio_params = self.get_chat_audio_params(chat_id)
+                stream = _build_stream(link, video=video, audio_params=audio_params)
 
                 self.active_calls.add(chat_id)
                 await add_active_chat(chat_id)
@@ -433,7 +627,7 @@ class Call:
                             recovered = await YouTube.recover_stream(link, videoid=vid, video=video)
                             if recovered:
                                 link = recovered
-                                stream = _build_stream(link, video=video)
+                                stream = _build_stream(link, video=video, audio_params=audio_params)
                                 continue
                         self.active_calls.discard(chat_id)
                         await remove_active_chat(chat_id)
@@ -465,6 +659,12 @@ class Call:
                 else:
                     await remove_active_video_chat(chat_id)
 
+                if getattr(config, "CALL_CHAT_ANNOUNCE", False) and db.get(chat_id):
+                    with suppress(Exception):
+                        cur = db[chat_id][0]
+                        t_name = (cur.get("title") or "Track")[:45]
+                        await self.send_call_message(chat_id, f"🎵 <b>Now Playing:</b> {t_name}")
+
                 if await is_autoend():
                     counter[chat_id] = {}
                     with suppress(Exception):
@@ -479,7 +679,16 @@ class Call:
                 asyncio.create_task(_release_join_flag(chat_id))
 
     async def start(self) -> None:
-        LOGGER(__name__).info("Starting PyTgCalls Clients (PyTgCalls v3.0.0 & NTgCalls v3.0.5)...")
+        pytg_v = getattr(_pytgcalls_pkg, "__version__", "4.0.0b4")
+        try:
+            import ntgcalls as _ntg_pkg
+            ntg_v = getattr(_ntg_pkg, "__version__", "auto")
+        except Exception:
+            ntg_v = "unknown"
+        LOGGER(__name__).info(
+            f"Starting PyTgCalls Clients (PyTgCalls v{pytg_v} & NTgCalls v{ntg_v} | "
+            f"Audio={config.AUDIO_QUALITY}, Video={config.VIDEO_QUALITY}, Passthrough={config.ENABLE_PASSTHROUGH})..."
+        )
         if self.userbot1:
             self.one = PyTgCalls(self.userbot1)
         if self.userbot2:
@@ -637,7 +846,8 @@ class Call:
                         thumb_task.cancel()
                     return await self.play(client, chat_id)
 
-            stream = _build_stream(final_link, video=is_video)
+            audio_params = self.get_chat_audio_params(chat_id)
+            stream = _build_stream(final_link, video=is_video, audio_params=audio_params)
 
             try:
                 try:
@@ -650,7 +860,7 @@ class Call:
                             video=is_video,
                         )
                         if fresh_link:
-                            stream = _build_stream(fresh_link, video=is_video)
+                            stream = _build_stream(fresh_link, video=is_video, audio_params=audio_params)
                             await client.play(chat_id, stream, config=GroupCallConfig(auto_start=True))
                         else:
                             raise
@@ -661,6 +871,10 @@ class Call:
                     await add_active_video_chat(chat_id)
                 else:
                     await remove_active_video_chat(chat_id)
+
+                if getattr(config, "CALL_CHAT_ANNOUNCE", False):
+                    with suppress(Exception):
+                        await self.send_call_message(chat_id, f"🎵 <b>Now Playing:</b> {title[:45]}")
 
                 img = await thumb_task if thumb_task else config.YOUTUBE_IMG_URL
                 from AnnieXMedia.utils.inline import stream_markup
