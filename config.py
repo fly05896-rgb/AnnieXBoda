@@ -1,6 +1,6 @@
 # ── 𝚂ᴏᴜʀᴄᴇ ✘ 𝐁ᴏᴅᴀ © 2026 ──────────────────────────────────────────────────────
 # Modified by: MusicBoda & TitanOS Core
-# Optimized for 16-Cores & 88GB RAM Performance | AI INTEGRATED
+# Optimized for Fly.io performance-cpu-10x@66560MB + Py-TgCalls v4.0.0b4
 
 import re
 import sys
@@ -36,7 +36,23 @@ DOWNLOAD_PATH = "/dev/shm/AnnieDownloads"
 if not os.path.exists(DOWNLOAD_PATH):
     os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
+RECORDING_PATH = "/dev/shm/AnnieRecordings"
+if not os.path.exists(RECORDING_PATH):
+    os.makedirs(RECORDING_PATH, exist_ok=True)
+
 AUTO_DOWNLOADS_CLEAR = getenv("AUTO_DOWNLOADS_CLEAR", "True")
+
+# ── 🎧 إعدادات جودة البث Py-TgCalls v4.0.0b4 (أقصى جودة + Passthrough) ───────
+# AUDIO_QUALITY: MASTER (510kbps أقصى جودة ستيريو) | STUDIO | HIGH | MEDIUM | LOW | VOICE
+AUDIO_QUALITY = getenv("AUDIO_QUALITY", "MASTER").upper()
+# AUDIO_BITRATE: لو أكبر من 0 (مثلاً 510000 أو 320000) يستخدم AudioParameters(sample_rate=48000, channels=2, bitrate=...)
+AUDIO_BITRATE = int(getenv("AUDIO_BITRATE", "0"))
+# VIDEO_QUALITY: UHD_4K | QHD_2K | FHD_1080p | HD_720p | SD_480p | SD_360p
+VIDEO_QUALITY = getenv("VIDEO_QUALITY", "FHD_1080p")
+# تفعيل Opus Passthrough و Video Passthrough (يمرر الصوت والفيديو بدون إعادة ترميز لتوفير الـ CPU وحفظ الجودة الأصلية)
+ENABLE_PASSTHROUGH = getenv("ENABLE_PASSTHROUGH", "True").lower() in ("true", "1", "yes")
+# إرسال اسم الأغنية تلقائياً في شات المكالمة الجماعية (ميزة Py-TgCalls v4.0 الجديدة)
+CALL_CHAT_ANNOUNCE = getenv("CALL_CHAT_ANNOUNCE", "False").lower() in ("true", "1", "yes")
 
 # ── Database & logging ─────────────────────────────────────────────────────────
 MONGO_DB_URI = getenv("MONGO_DB_URI")
