@@ -24,16 +24,15 @@ RUN uv pip install --upgrade setuptools wheel
 
 COPY requirements.txt .
 
-RUN grep -v -E -i '^(py-tgcalls|pytgcalls|tgcalls|deepai|numba|llvmlite|quimb)' requirements.txt > filtered.txt && \
+RUN grep -v -E -i '^(py-tgcalls|pytgcalls|tgcalls|ntgcalls|deepai|numba|llvmlite|quimb)' requirements.txt > filtered.txt && \
     uv pip install --no-cache -r filtered.txt
 
 RUN uv pip install --no-cache \
     g4f \
     curl_cffi \
     orjson \
-    ntgcalls \
-    py-tgcalls \
     yt-dlp && \
+    uv pip install --no-cache --prerelease=allow "py-tgcalls==4.0.0b4" && \
     uv pip install --no-cache --reinstall --no-deps "kurigram~=2.2.26"
 
 RUN mkdir -p /etc/yt-dlp && \
