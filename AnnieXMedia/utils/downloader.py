@@ -294,7 +294,7 @@ async def yt_dlp_download(link: str, type: str, title: str = "") -> Optional[str
                         None,
                         download_with_ytdlp_sync,
                         link,
-                        "140/251/bestaudio[ext=m4a]/bestaudio/18/best",
+                        "251/250/140/bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/18/best",
                     )
                 )
             )
